@@ -279,7 +279,7 @@ pub fn spawn_with_driver_state(
     (tx, out)
 }
 enum Link {
-    Physical(PhysicalLink),
+    Physical(Box<PhysicalLink>),
     Demo(DemoAdapter),
 }
 
@@ -501,6 +501,7 @@ fn mongoose_drivers(mut drivers: Vec<DriverInfo>, preferred: Option<&Path>) -> V
     drivers
 }
 
+#[allow(clippy::too_many_arguments)] // The worker owns the connection state and its retry deadlines.
 fn connect_mongoose(
     id: u64,
     discover: impl FnOnce() -> Vec<DriverInfo>,
@@ -940,6 +941,7 @@ fn freeze_frame_query(catalog: &[Query], pid: u8, frame: u8) -> Query {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Receives the frame, query catalog, and current session state.
 fn read_freeze_frame(
     adapter: &mut Link,
     id: u64,
@@ -1482,7 +1484,7 @@ fn run(
                 idle_voltage = Instant::now() + VOLTAGE_INTERVAL;
                 if cancel.load(Ordering::Relaxed) {
                     if let Ok((physical, _)) = result {
-                        link = Some(Link::Physical(physical));
+                        link = Some(Link::Physical(Box::new(physical)));
                         close_link(&mut link, &mut kline_retry_at);
                     }
                     let _ = tx.send(Event::Failed(id, "Connection cancelled.".into()));
@@ -1514,7 +1516,7 @@ fn run(
                         oxygen = OxygenSession::default();
                         info_scan = SupportScan::new(9, 0);
                         grouping_allowed = true;
-                        link = Some(Link::Physical(physical));
+                        link = Some(Link::Physical(Box::new(physical)));
                         let _ = tx.send(Event::Connected {
                             id,
                             driver: Some(driver),
@@ -1888,6 +1890,13 @@ pub struct DemoAdapter {
     started: Instant,
     cleared: bool,
 }
+
+impl Default for DemoAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DemoAdapter {
     pub fn new() -> Self {
         Self {

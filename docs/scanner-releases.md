@@ -14,7 +14,7 @@ The script writes `dist/scanner-workbench-mfc3-windows-x86.zip` and its `.sha256
 
 ## Publish the first build
 
-1. [Scanner Workbench Windows x86](../.github/workflows/scanner-release.yml) runs for changes to `main` and for pull requests into `main`. You can also run it from the Actions tab. It uses Rust 1.99.1 and LLVM-MinGW 20261020, runs the x86 tests, and uploads the ZIP and checksum to the run. Enable **Run an isolated Windows upgrade test** on a manual run to check installation and restart in a scratch directory.
+1. [Scanner Workbench Windows x86](../.github/workflows/scanner-release.yml) runs for changes to `main` and for pull requests into `main`. You can also run it from the Actions tab. It uses Rust 1.99.1 and WinLibs GCC 16.2.0 for i686, runs the x86 tests, and uploads the ZIP and checksum to the run. Enable **Run an isolated Windows upgrade test** on a manual run to check installation and restart in a scratch directory.
 2. Push an annotated tag such as `workbench-v0.1.0` on the commit to release. The workflow embeds the version from the tag in the executable, runs the isolated upgrade test and creates a draft release with the ZIP, installer and feed. The About panel under Connection shows the build version.
 3. Verify the draft on a clean Windows computer with the Mongoose driver installed. Publish the draft as the latest stable release to activate the shared [portable ZIP download](https://github.com/Supersam902/scanner-workbench/releases/latest/download/scanner-workbench-mfc3-windows-x86.zip). Use a dedicated repository for this feed if other apps have their own release tags. [Linking to GitHub releases](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)
 

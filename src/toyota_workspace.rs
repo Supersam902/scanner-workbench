@@ -471,10 +471,8 @@ impl Panel {
         }
         ui.separator();
         ui.horizontal_wrapped(|ui| {
-            if self.busy {
-                if ui.button("Stop operation").clicked() {
-                    self.stop_workspace();
-                }
+            if self.busy && ui.button("Stop operation").clicked() {
+                self.stop_workspace();
             }
             ui.label(&self.status);
         });
@@ -799,7 +797,31 @@ impl Panel {
             }
         });
         if self.workspace.confirm_clear {
-            ui.group(|ui|{ui.colored_label(Color32::from_rgb(240,170,80),"This erases emissions codes, freeze-frame data and readiness status. Permanent codes cannot be erased this way.");ui.horizontal(|ui|{if ui.add_enabled(connected&&!self.busy,egui::Button::new("Confirm clear")).clicked(){self.workspace.confirm_clear=false;outgoing=Some(self.job(vec![Query{bytes:vec![4],target:None,name:"Clear emissions data".into(),signals:Vec::new(),verified:false}],None,true));}if ui.button("Cancel").clicked(){self.workspace.confirm_clear=false;}});});
+            ui.group(|ui| {
+                ui.colored_label(
+                    Color32::from_rgb(240, 170, 80),
+                    "This erases emissions codes, freeze-frame data and readiness status. Permanent codes cannot be erased this way.",
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(connected && !self.busy, egui::Button::new("Confirm clear"))
+                        .clicked()
+                    {
+                        self.workspace.confirm_clear = false;
+                        let query = Query {
+                            bytes: vec![4],
+                            target: None,
+                            name: "Clear emissions data".into(),
+                            signals: Vec::new(),
+                            verified: false,
+                        };
+                        outgoing = Some(self.job(vec![query], None, true));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.workspace.confirm_clear = false;
+                    }
+                });
+            });
         }
         egui::ScrollArea::vertical()
             .max_height((ui.available_height() - 50.0).max(100.0))

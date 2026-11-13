@@ -1,28 +1,16 @@
-mod adapter;
-mod app;
-mod diagnostics;
-mod dtc_database;
-mod dtc_descriptions;
-mod elm327;
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(dead_code)] // The binary uses a subset; the library copy exposes parser metadata to tests.
-mod freematics_usb;
-mod gauges;
-mod obd;
-mod obd_ops;
-mod vin_decoder;
-
 // On WASM, only lib.rs (and its web_serial module) is used.
 // The binary target still compiles for WASM but is empty.
 #[cfg(target_arch = "wasm32")]
 fn main() {}
 
 #[cfg(not(target_arch = "wasm32"))]
-use adapter::DiagnosticAdapter as _;
-#[cfg(not(target_arch = "wasm32"))]
-use app::{ObdApp, ObdEvent, OdbCmd};
-#[cfg(not(target_arch = "wasm32"))]
-use dtc_database::DtcDatabase;
+use obd_dashboard::{
+    adapter::{self, DiagnosticAdapter as _},
+    app::{self, ObdApp, ObdEvent, OdbCmd},
+    diagnostics,
+    dtc_database::{self, DtcDatabase},
+    dtc_descriptions, elm_tcp, elm327, freematics_usb, j2534, obd, obd_ops,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Mutex, mpsc};
 #[cfg(not(target_arch = "wasm32"))]
@@ -788,11 +776,6 @@ fn title_case(s: &str) -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-mod elm_tcp;
-#[cfg(not(target_arch = "wasm32"))]
-mod j2534;
-
-#[cfg(not(target_arch = "wasm32"))]
 fn finish_connection(
     result: Result<AnyAdapter, elm327::Elm327Error>,
     adapter: &mut Option<AnyAdapter>,
@@ -816,7 +799,7 @@ fn finish_connection(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod telemetry_reader_drop_tests {
     use super::{TelemetryEnqueueResult, TelemetryReaderDropCounter, enqueue_telemetry_frame};
-    use crate::freematics_usb::FreematicsFrame;
+    use obd_dashboard::freematics_usb::FreematicsFrame;
     use std::collections::{HashMap, HashSet};
     use std::sync::mpsc;
 

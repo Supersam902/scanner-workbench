@@ -3216,16 +3216,51 @@ impl Workbench {
     }
     fn confirmations(&mut self, ctx: &egui::Context) {
         if self.confirm_clear {
-            egui::Window::new("Clear emissions diagnostic memory").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,Vec2::ZERO).show(ctx,|ui|{
-            ui.set_max_width(490.0);ui.label("This sends generic Mode 04. It can erase stored emissions codes and freeze-frame evidence, and reset readiness monitors. Permanent codes are not directly erased.");ui.label(format!("Vehicle: {}",self.vehicle.label()));ui.checkbox(&mut self.clear_ready,"I have saved the diagnostic evidence I need");
-            ui.horizontal(|ui|{if action(ui,"Confirm clear",self.clear_ready&&self.connected&&!self.busy){self.live=false;self.dispatch(vec![self.base_query(4,None)],None,ReadMode::Control);}if ui.button("Cancel").clicked(){self.confirm_clear=false;}});
-        });
+            egui::Window::new("Clear emissions diagnostic memory")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.set_max_width(490.0);
+                    ui.label("This sends generic Mode 04. It can erase stored emissions codes and freeze-frame evidence, and reset readiness monitors. Permanent codes are not directly erased.");
+                    ui.label(format!("Vehicle: {}", self.vehicle.label()));
+                    ui.checkbox(&mut self.clear_ready, "I have saved the diagnostic evidence I need");
+                    ui.horizontal(|ui| {
+                        if action(ui, "Confirm clear", self.clear_ready && self.connected && !self.busy) {
+                            self.live = false;
+                            self.dispatch(vec![self.base_query(4, None)], None, ReadMode::Control);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_clear = false;
+                        }
+                    });
+                });
         }
         if self.confirm_control {
-            egui::Window::new("Confirm generic component test").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,Vec2::ZERO).show(ctx,|ui|{
-            ui.set_max_width(490.0);ui.label("Mode 08 can command a component test. Use only the vehicle's documented test identifier and parameters under the required conditions.");ui.monospace(&self.manual);
-            ui.horizontal(|ui|{let same=self.control_signature==format!("{}|{}",self.manual,self.epoch);if action(ui,"Run test once",same&&self.connected&&!self.busy){match self.manual_query(){Ok(q)=>{self.live=false;self.dispatch(vec![q],None,ReadMode::Control);},Err(e)=>self.status=e}}if ui.button("Cancel").clicked(){self.confirm_control=false;}});
-        });
+            egui::Window::new("Confirm generic component test")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.set_max_width(490.0);
+                    ui.label("Mode 08 can command a component test. Use only the vehicle's documented test identifier and parameters under the required conditions.");
+                    ui.monospace(&self.manual);
+                    ui.horizontal(|ui| {
+                        let same = self.control_signature == format!("{}|{}", self.manual, self.epoch);
+                        if action(ui, "Run test once", same && self.connected && !self.busy) {
+                            match self.manual_query() {
+                                Ok(query) => {
+                                    self.live = false;
+                                    self.dispatch(vec![query], None, ReadMode::Control);
+                                }
+                                Err(error) => self.status = error,
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_control = false;
+                        }
+                    });
+                });
         }
     }
 }

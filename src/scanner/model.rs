@@ -21,7 +21,7 @@ pub enum ScanEvent {
 pub const MAX_CAPTURE_ROWS: usize = 50_000;
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Vehicle {
     pub make: String,
@@ -32,20 +32,6 @@ pub struct Vehicle {
     pub odometer: String,
     pub notes: String,
     pub experimental: bool,
-}
-impl Default for Vehicle {
-    fn default() -> Self {
-        Self {
-            make: String::new(),
-            model: String::new(),
-            year: String::new(),
-            vin: String::new(),
-            registration: String::new(),
-            odometer: String::new(),
-            notes: String::new(),
-            experimental: false,
-        }
-    }
 }
 impl Vehicle {
     pub fn label(&self) -> String {
