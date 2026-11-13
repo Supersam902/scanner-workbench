@@ -58,6 +58,7 @@ pub enum Page {
     ScanHistory,
     Reports,
     Help,
+    Updates,
 }
 impl Page {
     const NAVIGATION: [Self; 7] = [
@@ -71,7 +72,7 @@ impl Page {
     ];
 
     #[cfg(test)]
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 15] = [
         Self::Home,
         Self::Codes,
         Self::Live,
@@ -86,6 +87,7 @@ impl Page {
         Self::Reports,
         Self::Connection,
         Self::Help,
+        Self::Updates,
     ];
 
     fn section(self) -> Self {
@@ -93,7 +95,7 @@ impl Page {
             Self::FreezeFrame | Self::MonitorTests => Self::Emissions,
             Self::Garage | Self::Systems => Self::VehicleInfo,
             Self::Reports | Self::ScanHistory => Self::Recordings,
-            Self::Help => Self::Connection,
+            Self::Help | Self::Updates => Self::Connection,
             page => page,
         }
     }
@@ -106,7 +108,7 @@ impl Page {
             Self::Emissions | Self::FreezeFrame | Self::MonitorTests => "Emissions",
             Self::VehicleInfo | Self::Garage | Self::Systems => "Vehicle",
             Self::Recordings | Self::Reports | Self::ScanHistory => "Saved work",
-            Self::Connection | Self::Help => "Connection",
+            Self::Connection | Self::Help | Self::Updates => "Connection",
         }
     }
 
@@ -130,6 +132,7 @@ impl Page {
             Self::Connection => &[
                 (Self::Connection, "Adapter"),
                 (Self::Help, "Manual requests"),
+                (Self::Updates, "Updates"),
             ],
             _ => &[],
         }
@@ -1623,17 +1626,25 @@ impl Workbench {
     }
 
     #[cfg(windows)]
-    fn can_restart_for_update(&self) -> bool {
-        !self.connected
-            && !self.busy
-            && self.recording.is_none()
-            && self.unsaved.is_none()
-            && self.scan_history.pending_count() == 0
+    fn update_restart_blocker(&self) -> Option<&'static str> {
+        if self.busy {
+            Some("Wait for the current diagnostic operation to finish.")
+        } else if self.recording.is_some() || self.unsaved.is_some() {
+            Some("Save the recording under Saved work before restarting.")
+        } else if self.scan_history.pending_count() > 0 {
+            Some("Save pending scans in Scan history before restarting.")
+        } else if self.connected && self.demo {
+            Some("End the practice session on Overview before restarting.")
+        } else if self.connected {
+            Some("Disconnect from the vehicle before restarting.")
+        } else {
+            None
+        }
     }
 
     #[cfg(windows)]
     fn restart_for_update(&mut self, ctx: &egui::Context) {
-        if !self.can_restart_for_update() {
+        if self.update_restart_blocker().is_some() {
             return;
         }
         let Some(update) = self.updates.as_mut().and_then(updates::Updates::take_ready) else {
@@ -1656,6 +1667,7 @@ impl Workbench {
         match update.apply(restart_args) {
             Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Err(err) => {
+                tracing::warn!(%err, "Software update restart failed");
                 self.voltage = None;
                 (self.tx, self.rx) = worker::spawn(std::env::current_exe().ok(), self.root.clone());
                 if let Some(driver) = self.driver_override.take() {

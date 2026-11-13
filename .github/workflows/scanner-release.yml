@@ -136,8 +136,13 @@ jobs:
         shell: pwsh
         run: |
           $work = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'scanner-update-test')
+          $oldVersion = '0.1.0'
+          $newVersion = $env:SCANNER_WORKBENCH_VERSION
+          if ($newVersion -eq 'development' -or [version]$newVersion -le [version]$oldVersion) {
+              $newVersion = '0.1.1'
+          }
           $env:SCANNER_WORKBENCH_UPDATE_REPOSITORY = ''
-          foreach ($version in '0.1.0','0.1.1') {
+          foreach ($version in $oldVersion,$newVersion) {
               $env:SCANNER_WORKBENCH_VERSION = $version
               rustup run $env:RUST_TOOLCHAIN cargo build --locked --release --target $env:SCANNER_TARGET --features scanner-update-smoke --bin scanner-workstation
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -145,7 +150,7 @@ jobs:
               ./scripts/package-scanner.ps1 -Binary "target/$env:SCANNER_TARGET/release/scanner-workstation.exe" -OutputDirectory $stage -ExpectedVersion $version
               ./scripts/package-scanner-installer.ps1 -PackageDirectory (Join-Path $stage 'Scanner-Workbench') -Version $version -OutputDirectory (Join-Path $work.FullName "pack-$version") -ForLocalTest
           }
-          ./scripts/test-scanner-update.ps1 -OldPortableZip (Join-Path $work.FullName 'pack-0.1.0/ScannerWorkbenchApp-win-x86-Portable.zip') -NewFeed (Join-Path $work.FullName 'pack-0.1.1') -OutputDirectory (Join-Path $work.FullName 'upgrade')
+          ./scripts/test-scanner-update.ps1 -OldPortableZip (Join-Path $work.FullName "pack-$oldVersion/ScannerWorkbenchApp-win-x86-Portable.zip") -NewFeed (Join-Path $work.FullName "pack-$newVersion") -OutputDirectory (Join-Path $work.FullName 'upgrade')
 
       - name: Verify release contents
         shell: pwsh

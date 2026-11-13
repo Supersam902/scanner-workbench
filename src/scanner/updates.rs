@@ -3,11 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use velopack::bundle::Manifest;
+use velopack::download::{download_url_as_string, download_url_to_file};
 use velopack::locator::{LocationContext, VelopackLocator, auto_locate_app_manifest};
 #[cfg(feature = "scanner-update-smoke")]
 use velopack::sources::FileSource;
-use velopack::sources::{GithubSource, UpdateSource};
-use velopack::{Error, UpdateCheck, UpdateInfo, UpdateManager, VelopackAsset, VelopackAssetFeed};
+use velopack::sources::UpdateSource;
+use velopack::{
+    Error, HttpOptions, UpdateCheck, UpdateInfo, UpdateManager, VelopackAsset, VelopackAssetFeed,
+};
 
 const PACKAGE_ID: &str = "ScannerWorkbenchApp";
 const CHANNEL: &str = "win-x86";
@@ -21,10 +24,63 @@ pub fn initialize() {
         .run();
 }
 
-fn github_source() -> Option<GithubSource> {
-    REPOSITORY.map(|repository| {
-        GithubSource::new(&format!("https://github.com/{repository}"), None, false)
+fn github_source(status: Option<Sender<State>>) -> Option<PublicGithubRelease> {
+    REPOSITORY.map(|repository| PublicGithubRelease {
+        releases: format!("https://github.com/{repository}/releases"),
+        status,
     })
+}
+
+struct PublicGithubRelease {
+    releases: String,
+    status: Option<Sender<State>>,
+}
+
+impl UpdateSource for PublicGithubRelease {
+    fn get_release_feed(
+        &self,
+        channel: &str,
+        _app: &Manifest,
+        _staged_user_id: &str,
+    ) -> Result<VelopackAssetFeed, Error> {
+        let url = format!("{}/latest/download/releases.{channel}.json", self.releases);
+        let options = HttpOptions {
+            TimeoutMilliseconds: 15_000,
+            ..Default::default()
+        };
+        let json = download_url_as_string(&url, Some(&options))?;
+        Ok(serde_json::from_str(&json)?)
+    }
+
+    fn download_release_entry(
+        &self,
+        asset: &VelopackAsset,
+        local_file: &Path,
+        progress: Option<Sender<i16>>,
+    ) -> Result<(), Error> {
+        // Use the release named in the validated feed if Latest changes during the download.
+        let url = format!(
+            "{}/download/workbench-v{}/{}",
+            self.releases, asset.Version, asset.FileName
+        );
+        let options = HttpOptions {
+            TimeoutMilliseconds: 180_000,
+            ..Default::default()
+        };
+        let report = |percent: i16| {
+            if let Some(status) = &self.status {
+                let _ = status.send(State::Downloading {
+                    version: asset.Version.clone(),
+                    percent: percent.clamp(0, 100) as u8,
+                });
+            }
+            if let Some(progress) = &progress {
+                let _ = progress.send(percent);
+            }
+        };
+        report(0);
+        download_url_to_file(&url, local_file, Some(&options), report)
+    }
 }
 
 fn manager(source: impl UpdateSource + 'static) -> Result<(UpdateManager, VelopackLocator), Error> {
@@ -115,6 +171,7 @@ fn verify_package(path: &Path, asset: &VelopackAsset) -> Result<(), Error> {
 pub(super) enum State {
     Idle,
     Checking,
+    Downloading { version: String, percent: u8 },
     Current,
     Ready(ReadyUpdate),
     Failed(String),
@@ -122,14 +179,14 @@ pub(super) enum State {
 
 pub(super) struct Updates {
     state: State,
-    result: Option<Receiver<Result<Option<ReadyUpdate>, String>>>,
+    events: Option<Receiver<State>>,
 }
 
 impl Updates {
     pub(super) fn new() -> Self {
         Self {
             state: State::Idle,
-            result: None,
+            events: None,
         }
     }
 
@@ -153,37 +210,48 @@ impl Updates {
 
     pub(super) fn available() -> bool {
         REPOSITORY.is_some()
-            && auto_locate_app_manifest(LocationContext::FromCurrentExe)
-                .is_ok_and(|locator| workbench_package(&locator.get_manifest()))
+            && auto_locate_app_manifest(LocationContext::FromCurrentExe).is_ok_and(|locator| {
+                let manifest = locator.get_manifest();
+                workbench_package(&manifest) && manifest.version.to_string() == super::VERSION
+            })
     }
 
     pub(super) fn check(&mut self) {
-        let Some(source) = github_source() else {
-            return;
-        };
-        if matches!(self.state, State::Checking | State::Ready(_)) {
+        if self.events.is_some() || matches!(self.state, State::Ready(_)) {
             return;
         }
         let (tx, rx) = mpsc::channel();
+        let Some(source) = github_source(Some(tx.clone())) else {
+            return;
+        };
         self.state = State::Checking;
-        self.result = Some(rx);
+        self.events = Some(rx);
         std::thread::spawn(move || {
-            let _ = tx.send(stage(source).map_err(|err| err.to_string()));
+            let state = match stage(source) {
+                Ok(None) => State::Current,
+                Ok(Some(ready)) => State::Ready(ready),
+                Err(err) => {
+                    tracing::warn!(%err, "Software update check failed");
+                    State::Failed(err.to_string())
+                }
+            };
+            let _ = tx.send(state);
         });
     }
 
     pub(super) fn tick(&mut self) {
-        let Some(rx) = &self.result else { return };
-        self.state = match rx.try_recv() {
-            Ok(Ok(None)) => State::Current,
-            Ok(Ok(Some(ready))) => State::Ready(ready),
-            Ok(Err(err)) => State::Failed(err),
-            Err(mpsc::TryRecvError::Disconnected) => {
-                State::Failed("Update check ended early.".into())
+        while let Some(rx) = &self.events {
+            self.state = match rx.try_recv() {
+                Ok(state) => state,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    State::Failed("Update check ended early.".into())
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
+            };
+            if !matches!(self.state, State::Downloading { .. }) {
+                self.events = None;
             }
-            Err(mpsc::TryRecvError::Empty) => return,
-        };
-        self.result = None;
+        }
     }
 }
 
@@ -267,7 +335,7 @@ pub fn verify_update(
     let ready = match feed {
         Some(feed) => stage(FileSource::new(feed))?,
         None => stage(
-            github_source()
+            github_source(None)
                 .ok_or_else(|| Error::Other("No GitHub repository configured.".into()))?,
         )?,
     };
@@ -286,4 +354,37 @@ pub fn verify_update(
         std::fs::write(output, ready.version())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_progress_keeps_the_check_active_until_its_result() {
+        let (tx, rx) = mpsc::channel();
+        let mut updates = Updates {
+            state: State::Checking,
+            events: Some(rx),
+        };
+        for percent in [0, 25, 75] {
+            tx.send(State::Downloading {
+                version: "1.2.3".into(),
+                percent,
+            })
+            .unwrap();
+        }
+        updates.tick();
+        updates.check();
+        assert!(matches!(
+            updates.state(),
+            State::Downloading { version, percent: 75 } if version == "1.2.3"
+        ));
+
+        tx.send(State::Failed("Download interrupted".into()))
+            .unwrap();
+        updates.tick();
+        assert!(matches!(updates.state(), State::Failed(error) if error == "Download interrupted"));
+        assert!(updates.events.is_none());
+    }
 }

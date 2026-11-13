@@ -2336,6 +2336,7 @@ fn every_new_page_renders_in_compact_and_large_windows() {
                     "Value and limits",
                     "Before clear",
                 ],
+                Page::Updates => &["Software updates"],
                 _ => &[],
             };
             for label in important {

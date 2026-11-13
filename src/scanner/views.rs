@@ -219,6 +219,13 @@ impl Workbench {
                     for page in Page::NAVIGATION {
                         self.nav_button(ui, page);
                     }
+                    #[cfg(windows)]
+                    if self.page != Page::Updates
+                        && self.update_ready()
+                        && ui.link("Update ready").clicked()
+                    {
+                        self.page = Page::Updates;
+                    }
                 });
             });
         egui::CentralPanel::default()
@@ -258,6 +265,7 @@ impl Workbench {
                         Page::ScanHistory => self.scan_history(ui),
                         Page::Reports => self.reports(ui),
                         Page::Help => self.help(ui),
+                        Page::Updates => self.update_controls(ui),
                     });
             });
         self.confirmations(ctx);
@@ -706,14 +714,12 @@ impl Workbench {
             ui.add_space(8.0);
             card(ui, |ui| self.connection_attempts(ui));
         }
-        #[cfg(windows)]
-        self.update_controls(ui);
         self.log_view(ui);
         ui.collapsing("About this scanner", |ui| {
-            ui.label(if super::VERSION == "development" {
+            ui.label(if VERSION == "development" {
                 "Development build".to_owned()
             } else {
-                format!("Version {}", super::VERSION)
+                format!("Version {VERSION}")
             });
             ui.hyperlink_to(
                 "OBDb source definitions / CC BY-SA 4.0",
@@ -772,57 +778,101 @@ impl Workbench {
     }
 
     #[cfg(windows)]
-    fn update_controls(&mut self, ui: &mut egui::Ui) {
-        use super::updates::State;
+    fn update_ready(&self) -> bool {
+        self.updates
+            .as_ref()
+            .is_some_and(|updates| matches!(updates.state(), updates::State::Ready(_)))
+    }
 
-        let can_restart = self.can_restart_for_update();
-        let Some(updates) = &mut self.updates else {
-            return;
-        };
-        let mut restart = false;
-        ui.add_space(8.0);
+    fn update_controls(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(appearance::title("Software updates", 23.0));
-            let mut check = false;
-            ui.horizontal_wrapped(|ui| match updates.state() {
-                State::Checking => {
-                    ui.spinner();
-                    caption(ui, "Checking for and downloading updates…");
-                }
-                State::Ready(update) => {
-                    ui.label(format!("Version {} is ready", update.version()));
-                    restart = ui
-                        .add_enabled(can_restart, egui::Button::new("Restart to update"))
-                        .on_disabled_hover_text(
-                            "Disconnect and save pending work before restarting.",
-                        )
-                        .clicked();
-                }
-                state => {
-                    check = ui.button("Check for updates").clicked();
-                    match state {
-                        State::Current => caption(ui, "You’re up to date."),
-                        State::Failed(message) => {
-                            ui.colored_label(AMBER, "Update could not be prepared.")
-                                .on_hover_text(message);
-                        }
-                        _ => {}
-                    }
-                }
-            });
-            if check {
-                updates.check();
+            if VERSION == "development" {
+                caption(ui, "Development build");
+            } else {
+                caption(ui, &format!("Running version {VERSION}"));
             }
-            if let Some(repository) = super::updates::REPOSITORY {
+            #[cfg(windows)]
+            self.installed_update_controls(ui);
+            #[cfg(not(windows))]
+            caption(
+                ui,
+                "Automatic updates are available in the Windows installer.",
+            );
+        });
+    }
+
+    #[cfg(windows)]
+    fn installed_update_controls(&mut self, ui: &mut egui::Ui) {
+        use super::updates::{REPOSITORY, State};
+
+        let blocker = self.update_restart_blocker();
+        let Some(updates) = &mut self.updates else {
+            caption(
+                ui,
+                "Install Scanner Workbench from Setup to enable automatic updates.",
+            );
+            if let Some(repository) = REPOSITORY {
                 ui.hyperlink_to(
-                    "Release downloads",
-                    format!("https://github.com/{repository}/releases"),
+                    "Download Windows Setup",
+                    format!("https://github.com/{repository}/releases/latest/download/ScannerWorkbenchApp-win-x86-Setup.exe"),
                 );
             }
-        });
-        if restart {
-            self.restart_for_update(ui.ctx());
+            return;
+        };
+        match updates.state() {
+            State::Idle | State::Current => {
+                if matches!(updates.state(), State::Current) {
+                    ui.colored_label(GREEN, "You’re up to date.");
+                }
+                if ui.button("Check for updates").clicked() {
+                    updates.check();
+                }
+            }
+            State::Checking => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Checking for updates…");
+                });
+            }
+            State::Downloading { version, percent } => {
+                if *percent == 100 {
+                    ui.label(format!("Verifying version {version}…"));
+                } else {
+                    ui.label(format!("Downloading version {version}…"));
+                }
+                ui.add(
+                    egui::ProgressBar::new(f32::from(*percent) / 100.0)
+                        .desired_width(280.0)
+                        .show_percentage(),
+                );
+            }
+            State::Ready(update) => {
+                ui.colored_label(GREEN, format!("Version {} is ready", update.version()));
+                if ui
+                    .add_enabled(blocker.is_none(), egui::Button::new("Restart to update"))
+                    .clicked()
+                {
+                    self.restart_for_update(ui.ctx());
+                }
+                if let Some(message) = blocker {
+                    caption(ui, message);
+                }
+            }
+            State::Failed(message) => {
+                ui.colored_label(AMBER, "Update failed.");
+                ui.collapsing("Error details", |ui| caption(ui, message));
+                if ui.button("Retry update").clicked() {
+                    updates.check();
+                }
+            }
+        }
+        if let Some(repository) = REPOSITORY {
+            ui.hyperlink_to(
+                "Release downloads",
+                format!("https://github.com/{repository}/releases/latest"),
+            );
         }
     }
 

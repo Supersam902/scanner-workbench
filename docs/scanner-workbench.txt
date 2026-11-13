@@ -32,6 +32,13 @@ Windows 32-bit build, November 13, 2026, revision 26
    both periods. A missing or incomplete reply is marked unverified.
    Print comparison opens a printable copy.
 
+Software updates
+If you installed Workbench from Setup, open Connection > Updates to check
+the running version and download progress. A ready update also appears in
+the navigation bar. Disconnect and save pending work before clicking
+Restart to update. Use Download Windows Setup from the portable build to
+enable automatic checks.
+
 DLC voltage
 One readout at the top shows voltage at the vehicle's diagnostic connector.
 The adapter reads it about every two seconds, including between diagnostic
