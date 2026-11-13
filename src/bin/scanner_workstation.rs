@@ -17,19 +17,25 @@ fn main() -> eframe::Result {
     obd_dashboard::scanner::updates::initialize();
     #[cfg(all(windows, feature = "scanner-update-smoke"))]
     {
-        if args
-            .get(1)
-            .is_some_and(|arg| arg == "--verify-local-update")
-        {
-            let (Some(feed), Some(output), Some(data)) = (args.get(2), args.get(3), args.get(4))
-            else {
-                std::process::exit(2);
-            };
-            if let Err(err) = obd_dashboard::scanner::updates::verify_local_update(
-                std::path::Path::new(feed),
-                std::path::Path::new(output),
-                std::path::Path::new(data),
-                args.get(5).is_some_and(|arg| arg == "--apply"),
+        use std::path::Path;
+        let request = match args.get(1) {
+            Some(flag) if flag == "--verify-local-update" => match args.get(2..5) {
+                Some([feed, output, data]) => Some((Some(Path::new(feed)), output, data, 5)),
+                _ => std::process::exit(2),
+            },
+            Some(flag) if flag == "--verify-github-update" => match args.get(2..4) {
+                Some([output, data]) => Some((None, output, data, 4)),
+                _ => std::process::exit(2),
+            },
+            _ => None,
+        };
+        if let Some((feed, output, data, apply_index)) = request {
+            let apply = feed.is_some() && args.get(apply_index).is_some_and(|arg| arg == "--apply");
+            if let Err(err) = obd_dashboard::scanner::updates::verify_update(
+                feed,
+                Path::new(output),
+                Path::new(data),
+                apply,
             ) {
                 let _ = std::fs::write(output, err.to_string());
                 std::process::exit(1);

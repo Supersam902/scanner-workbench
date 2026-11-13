@@ -46,6 +46,7 @@ pub enum Command {
         ecu: Option<u8>,
         cancel: Arc<AtomicBool>,
     },
+    SelectDriver(Option<PathBuf>),
     Demo {
         id: u64,
     },
@@ -477,7 +478,11 @@ impl DiagnosticAdapter for Link {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }
-fn mongoose_drivers(mut drivers: Vec<DriverInfo>, preferred: Option<&Path>) -> Vec<DriverInfo> {
+fn driver_candidates(
+    mut drivers: Vec<DriverInfo>,
+    selected: Option<&Path>,
+    preferred: Option<&Path>,
+) -> Vec<DriverInfo> {
     fn rank(driver: &DriverInfo) -> u8 {
         let name = driver.name.to_ascii_lowercase();
         let file = driver
@@ -494,6 +499,11 @@ fn mongoose_drivers(mut drivers: Vec<DriverInfo>, preferred: Option<&Path>) -> V
             2
         }
     }
+    if let Some(path) = selected {
+        drivers.retain(|driver| driver.path == path);
+        drivers.truncate(1);
+        return drivers;
+    }
     drivers.retain(|driver| rank(driver) < 2);
     drivers.sort_by_key(|driver| (rank(driver), preferred != Some(driver.path.as_path())));
     let mut seen = BTreeSet::new();
@@ -502,9 +512,9 @@ fn mongoose_drivers(mut drivers: Vec<DriverInfo>, preferred: Option<&Path>) -> V
 }
 
 #[allow(clippy::too_many_arguments)] // The worker owns the connection state and its retry deadlines.
-fn connect_mongoose(
+fn connect_vehicle(
     id: u64,
-    discover: impl FnOnce() -> Vec<DriverInfo>,
+    drivers: Vec<DriverInfo>,
     override_protocol: Option<CanProtocol>,
     ecu: Option<u8>,
     cancel: &AtomicBool,
@@ -521,19 +531,8 @@ fn connect_mongoose(
     let progress = |message| {
         let _ = tx.send(Event::ConnectProgress(id, message));
     };
-    // A saved path can only change the order of matching, installed drivers.
-    let drivers = mongoose_drivers(
-        discover(),
-        last_connection.map(|connection| connection.driver.as_path()),
-    );
     if cancelled() {
         return Err("Connection cancelled.".into());
-    }
-    if drivers.is_empty() {
-        return Err(
-            "No Mongoose J2534 04.04 driver found. Install the Opus IVS driver for your cable."
-                .into(),
-        );
     }
     let automatic = override_protocol.is_none() && ecu.is_none();
     let default_protocols: &[CanProtocol] = match override_protocol {
@@ -749,17 +748,17 @@ fn connect_mongoose(
     } else if cable_opened {
         let result = match furthest_phase {
             Some(ProbePhase::Transmit) => {
-                "The Mongoose opened. Diagnostic request transmission failed."
+                "The adapter opened. Diagnostic request transmission failed."
             }
-            Some(ProbePhase::Reply) => "The Mongoose sent a request. No OBD-II reply was verified.",
+            Some(ProbePhase::Reply) => "The adapter sent a request. No OBD-II reply was verified.",
             Some(ProbePhase::Keepalive) => {
                 "An ECU replied. The scanner could not start the K-line keepalive."
             }
             Some(ProbePhase::Cleanup) => {
                 "An ECU answered CAN discovery. The driver could not release the discovery channel."
             }
-            Some(_) => "The Mongoose opened. The scanner could not start a diagnostic session.",
-            None => "The Mongoose opened. The driver process failed during the connection check.",
+            Some(_) => "The adapter opened. The scanner could not start a diagnostic session.",
+            None => "The adapter opened. The driver process failed during the connection check.",
         };
         Err(format!("{result} See Connection for details."))
     } else {
@@ -767,7 +766,7 @@ fn connect_mongoose(
             "{}. See Connection for the attempt log.",
             last_open_error
                 .as_deref()
-                .unwrap_or("Could not open a Mongoose cable")
+                .unwrap_or("Could not open a J2534 adapter")
                 .trim_end_matches('.')
         ))
     }
@@ -776,10 +775,11 @@ fn connect_mongoose(
 fn sample_idle_voltage(
     runtime: &DriverRuntime,
     discover: &impl Fn() -> Vec<DriverInfo>,
+    selected: Option<&Path>,
     preferred: Option<&Path>,
     interrupted: impl Fn() -> bool,
 ) -> Result<Option<VoltageSample>, String> {
-    let mut drivers = mongoose_drivers(discover(), None);
+    let mut drivers = driver_candidates(discover(), selected, None);
     if let Some(path) = preferred {
         drivers.sort_by_key(|driver| driver.path != path);
     }
@@ -1361,6 +1361,7 @@ fn run(
     let mut scan_responders = ScanResponders::new();
     let mut grouping_allowed = true;
     let mut idle_voltage = Instant::now() + VOLTAGE_INTERVAL;
+    let mut selected_driver = None::<PathBuf>;
     let mut voltage_driver = None::<PathBuf>;
     let mut kline_retry_at = Instant::now();
     let mut last_connection = None::<LastConnection>;
@@ -1404,6 +1405,7 @@ fn run(
                         let result = sample_idle_voltage(
                             &runtime,
                             &discover,
+                            selected_driver.as_deref(),
                             voltage_driver.as_deref(),
                             interrupted,
                         );
@@ -1432,6 +1434,14 @@ fn run(
         };
         match command {
             Command::Shutdown => break,
+            Command::SelectDriver(path) => {
+                if !matches!(link, Some(Link::Physical(_))) {
+                    selected_driver = path;
+                    voltage_driver = None;
+                    idle_voltage = Instant::now();
+                    let _ = tx.send(Event::Voltage(None));
+                }
+            }
             Command::Disconnect { id } => {
                 close_link(&mut link, &mut kline_retry_at);
                 idle_voltage = Instant::now() + VOLTAGE_INTERVAL;
@@ -1469,18 +1479,36 @@ fn run(
                     .connection_cache
                     .as_deref()
                     .and_then(|path| load_json::<LastConnection>(path).ok());
-                let result = connect_mongoose(
-                    id,
-                    &discover,
-                    protocol,
-                    ecu,
-                    &cancel,
-                    &tx,
-                    &runtime,
-                    &mut voltage_driver,
-                    &mut kline_retry_at,
-                    saved.as_ref().or(last_connection.as_ref()),
+                let remembered = saved.as_ref().or(last_connection.as_ref());
+                let drivers = driver_candidates(
+                    discover(),
+                    selected_driver.as_deref(),
+                    remembered.map(|connection| connection.driver.as_path()),
                 );
+                let result = if cancel.load(Ordering::Relaxed) {
+                    Err("Connection cancelled.".into())
+                } else if drivers.is_empty() {
+                    Err(if selected_driver.is_some() {
+                        "The selected J2534 driver is no longer listed. Choose an installed driver under Connection."
+                            .into()
+                    } else {
+                        "No Mongoose driver found. Install its 32-bit J2534 04.04 driver or select another adapter under Connection."
+                            .into()
+                    })
+                } else {
+                    connect_vehicle(
+                        id,
+                        drivers,
+                        protocol,
+                        ecu,
+                        &cancel,
+                        &tx,
+                        &runtime,
+                        &mut voltage_driver,
+                        &mut kline_retry_at,
+                        remembered,
+                    )
+                };
                 idle_voltage = Instant::now() + VOLTAGE_INTERVAL;
                 if cancel.load(Ordering::Relaxed) {
                     if let Ok((physical, _)) = result {

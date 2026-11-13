@@ -5,7 +5,8 @@ Windows 32-bit build, November 13, 2026, revision 26
 2. Open the app from the MFC3 desktop shortcut or the executable in this folder.
 3. Click Connect at the top. The scanner starts with MFC3 drivers and checks
    other registered Mongoose drivers if needed. It connects after a verified
-   OBD-II reply. You can start without entering a vehicle.
+   OBD-II reply. You can start without entering a vehicle. To try another
+   J2534 adapter, choose its installed driver under Connection > Adapter.
    After Connect, the VIN field beside DLC voltage shows the VIN received
    from the vehicle. Hover to highlight it, then click to copy it. The field
    displays Copied briefly. If the VIN is unavailable, use Read VIN under
@@ -33,7 +34,7 @@ Windows 32-bit build, November 13, 2026, revision 26
 
 DLC voltage
 One readout at the top shows voltage at the vehicle's diagnostic connector.
-The Mongoose reads it about every two seconds, including between diagnostic
+The adapter reads it about every two seconds, including between diagnostic
 requests. Before Connect and during practice, it can sample the connector
 through a cable with no diagnostic session open. Hover over the voltage to
 see which driver supplied it. A dash means a current sample is unavailable.
@@ -55,8 +56,11 @@ Use Protocol override there to limit Connect to a single protocol. A known
 29-bit ECU source limits Connect to 29-bit CAN. Overrides last until the
 app closes.
 
-The installed Mongoose 04.04 driver must match the 32-bit app. The scanner
-runs it in a separate process. If the driver loses the diagnostic channel or
+The Driver picker lists registered J2534 04.04 drivers for the app's bitness.
+Automatic (Mongoose) is the default. Selecting another driver uses it for
+Connect and for the disconnected voltage reading until the app closes.
+Support depends on the driver and vehicle protocol. The scanner runs the
+driver in a separate process. If it loses the diagnostic channel or
 stops responding, click Connect to start a fresh session. If an emissions
 clear was interrupted, read the codes and readiness again to see what the
 vehicle applied.

@@ -74,7 +74,7 @@ fn connection_page_keeps_the_latest_mongoose_result_after_starting_practice() {
         .send(Event::ConnectAttempt(id - 1, attempt()))
         .unwrap();
     events.send(Event::ConnectAttempt(id, attempt())).unwrap();
-    let result = "The Mongoose opened. Diagnostic request transmission failed.";
+    let result = "The adapter opened. Diagnostic request transmission failed.";
     events.send(Event::Failed(id, result.into())).unwrap();
     events.send(Event::ConnectAttempt(id, attempt())).unwrap();
     app.tick();
@@ -129,6 +129,58 @@ fn connection_page_keeps_the_latest_mongoose_result_after_starting_practice() {
     events.send(Event::Failed(id, result.into())).unwrap();
     app.tick();
     assert_eq!(app.connection_error.as_deref(), Some(result));
+}
+
+#[test]
+fn the_driver_picker_changes_the_next_connection_and_voltage_source() {
+    let mut app = Workbench::new(temp("driver-picker"));
+    let (events, rx) = mpsc::channel();
+    app.rx = rx;
+    app.page = Page::Connection;
+    let driver = DriverInfo {
+        name: "Other J2534 adapter".into(),
+        path: "other-fixture.dll".into(),
+    };
+    app.installed_drivers = Some(vec![driver.clone()]);
+    app.select_driver(Some(driver.clone()));
+    assert_eq!(app.driver_override.as_ref(), Some(&driver));
+
+    let ctx = render_context();
+    let output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 640.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| app.draw(ctx),
+    );
+    assert!(output.shapes.iter().any(|shape| {
+        matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == driver.name)
+    }));
+
+    for candidate in [
+        driver.clone(),
+        DriverInfo {
+            name: "Mongoose".into(),
+            path: "mongoose-fixture.dll".into(),
+        },
+    ] {
+        events
+            .send(Event::Voltage(Some(VoltageSample {
+                driver: candidate,
+                millivolts: 12600,
+                sampled_at: Instant::now(),
+            })))
+            .unwrap();
+    }
+    app.tick();
+    assert_eq!(app.voltage.as_ref().unwrap().driver, driver);
+    app.connect();
+    assert!(app.status.contains(&driver.name));
+    app.select_driver(None);
+    assert_eq!(app.driver_override.as_ref(), Some(&driver));
 }
 
 #[test]

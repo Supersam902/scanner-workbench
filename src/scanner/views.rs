@@ -469,7 +469,7 @@ impl Workbench {
                         } else if self.connected {
                             "Vehicle connected"
                         } else {
-                            "Connect your Mongoose"
+                            "Connect your adapter"
                         };
                         ui.label(appearance::title(title, 27.0));
                         if let Some(driver) = &self.driver {
@@ -653,9 +653,9 @@ impl Workbench {
                 ui.label(RichText::new(driver).size(18.0).strong());
                 caption(ui, &self.protocol);
             } else {
-                ui.label(RichText::new("Mongoose").size(18.0).strong());
-                caption(ui, "Automatic selection starts with the MFC3.");
+                ui.label(RichText::new("J2534 adapter").size(18.0).strong());
             }
+            self.driver_picker(ui);
             if let Some(reply) = self.vehicle_reply {
                 ui.horizontal_wrapped(|ui| {
                     let age = reply.last_reply.elapsed().as_secs();
@@ -730,6 +730,47 @@ impl Workbench {
         });
     }
 
+    fn driver_picker(&mut self, ui: &mut egui::Ui) {
+        let enabled = !self.busy && (!self.connected || self.demo);
+        let mut selected = self.driver_override.clone();
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let drivers = self.installed_drivers.get_or_insert_with(discover_drivers);
+                ui.label("Driver");
+                egui::ComboBox::from_id_salt("scanner_driver")
+                    .width(265.0)
+                    .selected_text(
+                        self.driver_override
+                            .as_ref()
+                            .map_or("Automatic (Mongoose)", |driver| &driver.name),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected, None, "Automatic (Mongoose)");
+                        for driver in drivers.iter() {
+                            ui.selectable_value(&mut selected, Some(driver.clone()), &driver.name)
+                                .on_hover_text(driver.path.display().to_string());
+                        }
+                    });
+                if ui.button("Refresh drivers").clicked() {
+                    *drivers = discover_drivers();
+                }
+            });
+        });
+        if selected != self.driver_override {
+            self.select_driver(selected);
+        }
+        if self.driver.is_none() {
+            if self.installed_drivers.as_ref().is_some_and(Vec::is_empty) {
+                caption(ui, "No matching J2534 04.04 drivers found.");
+            } else {
+                caption(
+                    ui,
+                    "Automatic starts with the MFC3. Driver selection lasts until the app closes.",
+                );
+            }
+        }
+    }
+
     #[cfg(windows)]
     fn update_controls(&mut self, ui: &mut egui::Ui) {
         use super::updates::State;
@@ -786,7 +827,7 @@ impl Workbench {
     }
 
     fn has_connection_details(&self) -> bool {
-        self.mongoose_connect.is_some()
+        self.adapter_connect.is_some()
             || self.connection_error.is_some()
             || !self.connection_attempts.is_empty()
     }
@@ -829,7 +870,7 @@ impl Workbench {
             .id_salt("connection_attempts")
             .max_height(295.0)
             .auto_shrink([false, true])
-            .stick_to_bottom(self.mongoose_connect.is_some())
+            .stick_to_bottom(self.adapter_connect.is_some())
             .show(ui, |ui| {
                 for (index, attempt) in self.connection_attempts.iter().enumerate() {
                     if index > 0 {

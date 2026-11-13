@@ -49,7 +49,7 @@ uint32_t PassThruStartMsgFilter(uint32_t channel, uint32_t type, Message *mask,
     uint32_t response = flags ? 0x18DAF110 : 0x7e8 + filters;
     uint32_t flow_id = flags ? 0x18DA10F1 : 0x7e0 + filters;
     if (id(pattern) != response || id(flow) != flow_id) return 3;
-    if (id(mask) != (flags ? 0x1fffffff : 0x7ff)) return 3;
+    if (id(mask) != (flags ? UINT32_MAX : 0x7ff)) return 3;
     *filter = ++filters;
     return 0;
 }

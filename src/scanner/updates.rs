@@ -21,6 +21,12 @@ pub fn initialize() {
         .run();
 }
 
+fn github_source() -> Option<GithubSource> {
+    REPOSITORY.map(|repository| {
+        GithubSource::new(&format!("https://github.com/{repository}"), None, false)
+    })
+}
+
 fn manager(source: impl UpdateSource + 'static) -> Result<(UpdateManager, VelopackLocator), Error> {
     let locator = auto_locate_app_manifest(LocationContext::FromCurrentExe)?;
     let manifest = locator.get_manifest();
@@ -152,7 +158,9 @@ impl Updates {
     }
 
     pub(super) fn check(&mut self) {
-        let Some(repository) = REPOSITORY else { return };
+        let Some(source) = github_source() else {
+            return;
+        };
         if matches!(self.state, State::Checking | State::Ready(_)) {
             return;
         }
@@ -160,8 +168,6 @@ impl Updates {
         self.state = State::Checking;
         self.result = Some(rx);
         std::thread::spawn(move || {
-            let source =
-                GithubSource::new(&format!("https://github.com/{repository}"), None, false);
             let _ = tx.send(stage(source).map_err(|err| err.to_string()));
         });
     }
@@ -247,22 +253,29 @@ fn stage(source: impl UpdateSource + 'static) -> Result<Option<ReadyUpdate>, Err
     }))
 }
 
-/// Exercises the production staging and apply paths against an isolated portable installation.
+/// Exercises staging from a local or GitHub feed, with restart for local smoke tests.
 #[cfg(feature = "scanner-update-smoke")]
 #[doc(hidden)]
-pub fn verify_local_update(
-    feed: &Path,
+pub fn verify_update(
+    feed: Option<&Path>,
     output: &Path,
     data: &Path,
     apply: bool,
 ) -> Result<(), Error> {
     // Exercise the same settings read used by the desktop app after the restart.
     super::model::Settings::load(data).map_err(Error::Other)?;
-    let Some(ready) = stage(FileSource::new(feed))? else {
+    let ready = match feed {
+        Some(feed) => stage(FileSource::new(feed))?,
+        None => stage(
+            github_source()
+                .ok_or_else(|| Error::Other("No GitHub repository configured.".into()))?,
+        )?,
+    };
+    let Some(ready) = ready else {
         std::fs::write(output, super::VERSION)?;
         return Ok(());
     };
-    if apply {
+    if apply && let Some(feed) = feed {
         ready.apply([
             OsString::from("--verify-local-update"),
             feed.as_os_str().to_owned(),

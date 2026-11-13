@@ -23,7 +23,7 @@ pub mod worker;
 
 use crate::adapter::{decode_hex, encode_hex};
 use crate::diagnostics::{self, PidSupport, Query, Reading, Update};
-use crate::j2534::CanProtocol;
+use crate::j2534::{CanProtocol, DriverInfo, discover_drivers};
 pub use appearance::icon_data as workbench_icon;
 use model::*;
 use readiness::Period as ReadinessPeriod;
@@ -177,6 +177,8 @@ pub struct Workbench {
     restarting_for_update: Option<updates::ReadyUpdate>,
     splash: StartupSplash,
     driver: Option<String>,
+    driver_override: Option<DriverInfo>,
+    installed_drivers: Option<Vec<DriverInfo>>,
     protocol_override: Option<CanProtocol>,
     ecu_source: Option<u8>,
     vehicle: Vehicle,
@@ -196,7 +198,7 @@ pub struct Workbench {
     vehicle_reply: Option<VehicleReply>,
     connection_attempts: Vec<ConnectionAttempt>,
     connection_error: Option<String>,
-    mongoose_connect: Option<u64>,
+    adapter_connect: Option<u64>,
     epoch: u64,
     cancel: Arc<AtomicBool>,
     busy: bool,
@@ -323,6 +325,8 @@ impl Workbench {
             restarting_for_update: None,
             splash: StartupSplash::Hidden,
             driver: None,
+            driver_override: None,
+            installed_drivers: None,
             protocol_override: None,
             ecu_source: None,
             draft,
@@ -342,7 +346,7 @@ impl Workbench {
             vehicle_reply: None,
             connection_attempts: Vec::new(),
             connection_error: None,
-            mongoose_connect: None,
+            adapter_connect: None,
             epoch: 1,
             cancel: Arc::new(AtomicBool::new(false)),
             busy: false,
@@ -452,7 +456,7 @@ impl Workbench {
         self.recording_list_offset = 0;
     }
     fn cancel_operation(&mut self) {
-        if self.mongoose_connect.take().is_some() {
+        if self.adapter_connect.take().is_some() {
             self.connection_error = Some("Connection cancelled.".into());
         }
         self.finish_emissions_scan(true);
@@ -550,6 +554,24 @@ impl Workbench {
         self.playback_path = None;
         self.replay_playing = false;
     }
+
+    fn select_driver(&mut self, driver: Option<DriverInfo>) {
+        if self.busy || self.connected && !self.demo || self.driver_override == driver {
+            return;
+        }
+        let path = driver.as_ref().map(|driver| driver.path.clone());
+        match self.tx.try_send(Command::SelectDriver(path)) {
+            Ok(()) => {
+                self.driver_override = driver;
+                self.voltage = None;
+                self.connection_attempts.clear();
+                self.connection_error = None;
+                self.status = "Ready to connect.".into();
+            }
+            Err(error) => self.status = format!("Could not change the driver. {error}"),
+        }
+    }
+
     fn connect(&mut self) {
         if self.busy || self.connected && !self.demo {
             return;
@@ -569,8 +591,11 @@ impl Workbench {
         self.busy = true;
         self.connection_attempts.clear();
         self.connection_error = None;
-        self.mongoose_connect = Some(self.epoch);
-        self.status = "Finding the active Mongoose cable…".into();
+        self.adapter_connect = Some(self.epoch);
+        self.status = self.driver_override.as_ref().map_or_else(
+            || "Finding the active Mongoose cable…".into(),
+            |driver| format!("Connecting through {}…", driver.name),
+        );
         if !self.send(Command::Connect {
             id: self.epoch,
             protocol: self.protocol_override,
@@ -579,7 +604,7 @@ impl Workbench {
                 .filter(|_| self.protocol_override.is_none_or(CanProtocol::extended)),
             cancel: self.cancel.clone(),
         }) {
-            self.mongoose_connect = None;
+            self.adapter_connect = None;
             self.connection_error = Some(self.status.clone());
         }
     }
@@ -1019,12 +1044,11 @@ impl Workbench {
         for event in events {
             match event {
                 Event::ConnectProgress(id, text)
-                    if self.mongoose_connect == Some(id)
-                        && !self.cancel.load(Ordering::Relaxed) =>
+                    if self.adapter_connect == Some(id) && !self.cancel.load(Ordering::Relaxed) =>
                 {
                     self.status = text;
                 }
-                Event::ConnectAttempt(id, attempt) if self.mongoose_connect == Some(id) => {
+                Event::ConnectAttempt(id, attempt) if self.adapter_connect == Some(id) => {
                     self.connection_attempts.push(attempt);
                 }
                 Event::Connected {
@@ -1038,7 +1062,7 @@ impl Workbench {
                         self.disconnect();
                         continue;
                     }
-                    self.mongoose_connect = None;
+                    self.adapter_connect = None;
                     if !demo {
                         self.reset_results();
                         self.vehicle = Vehicle::default();
@@ -1082,6 +1106,13 @@ impl Workbench {
                     self.log(self.status.clone());
                 }
                 Event::Voltage(value) => {
+                    if let Some(selected) = &self.driver_override
+                        && value
+                            .as_ref()
+                            .is_some_and(|sample| sample.driver.path != selected.path)
+                    {
+                        continue;
+                    }
                     self.voltage = value;
                 }
                 Event::VehicleReply(id, reply)
@@ -1114,7 +1145,7 @@ impl Workbench {
                     }
                 }
                 Event::Failed(id, text) if id == self.epoch => {
-                    if self.mongoose_connect.take() == Some(id) {
+                    if self.adapter_connect.take() == Some(id) {
                         self.connection_error = Some(text.clone());
                     }
                     self.connection_failed(text);
@@ -1627,6 +1658,9 @@ impl Workbench {
             Err(err) => {
                 self.voltage = None;
                 (self.tx, self.rx) = worker::spawn(std::env::current_exe().ok(), self.root.clone());
+                if let Some(driver) = self.driver_override.take() {
+                    self.select_driver(Some(driver));
+                }
                 if let Some(updates) = &mut self.updates {
                     updates.fail(format!("Could not restart to update. {err}"));
                 }

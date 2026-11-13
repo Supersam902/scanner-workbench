@@ -1739,6 +1739,51 @@ fn connect_tries_another_mongoose_after_a_stall_and_a_silent_vehicle() {
 }
 
 #[test]
+fn selected_j2534_driver_supplies_voltage_and_connections() {
+    let mongoose = fixture(0);
+    let other = fixture(0);
+    let entries = Arc::new(Mutex::new(vec![
+        driver_entry("Mongoose-Plus MFC3", &mongoose),
+        driver_entry("Other J2534 adapter", &other),
+    ]));
+    let available = entries.clone();
+    let (tx, rx) = worker_with_drivers(move || available.lock().unwrap().clone());
+    send(&tx, Command::SelectDriver(Some(other.clone())));
+    until(
+        &rx,
+        Duration::from_secs(8),
+        |event| matches!(event, Event::Voltage(Some(sample)) if sample.driver.path == other && sample.millivolts == 12600),
+    );
+    assert_eq!(marks(&mongoose, "open"), 0);
+    assert_eq!(marks(&other, "channel"), 0);
+
+    connect(&tx, 1);
+    connected_as(&rx, 1, "Other J2534 adapter", Duration::from_secs(8));
+    assert_eq!(marks(&mongoose, "open"), 0);
+    assert_eq!(marks(&other, "channel"), 1);
+
+    send(&tx, Command::Disconnect { id: 2 });
+    until(&rx, Duration::from_secs(4), |event| {
+        matches!(event, Event::Disconnected(2))
+    });
+    entries
+        .lock()
+        .unwrap()
+        .retain(|driver| driver.path != other);
+    connect(&tx, 3);
+    until(
+        &rx,
+        Duration::from_secs(4),
+        |event| matches!(event, Event::Failed(3, reason) if reason.contains("no longer listed")),
+    );
+    assert_eq!(marks(&mongoose, "open"), 0);
+
+    send(&tx, Command::SelectDriver(None));
+    connect(&tx, 4);
+    connected(&rx, 4);
+}
+
+#[test]
 fn cancelling_connect_does_not_start_the_next_driver() {
     let stalled = fixture(1);
     let healthy = fixture(0);
