@@ -1,8 +1,6 @@
 pub mod adapter;
 pub mod app;
 pub mod diagnostics;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod scanner;
 pub mod dtc_database;
 pub mod dtc_descriptions;
 pub mod elm327;
@@ -13,6 +11,8 @@ mod freematics_usb;
 pub mod gauges;
 pub mod obd;
 pub mod obd_ops;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod scanner;
 pub mod vin_decoder;
 
 #[cfg(target_arch = "wasm32")]
