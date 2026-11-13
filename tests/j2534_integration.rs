@@ -50,7 +50,7 @@ fn native_driver_connects_reads_faults_and_vin_and_cleans_up_errors() {
         .filter(|protocol| protocol.is_can())
     {
         let mut adapter = J2534::connect(&driver, protocol).unwrap();
-        assert_eq!(block_on(adapter.voltage()).unwrap(), "12.6V");
+        assert_eq!(block_on(adapter.voltage()).unwrap(), "12.6 V");
         let replies = block_on(adapter.request(&[1, 0], 1000)).unwrap();
         assert_eq!(
             replies.len(),
