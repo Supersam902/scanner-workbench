@@ -86,7 +86,7 @@ pub(super) struct History {
     pub(super) search: String,
     pub(super) problem: Option<String>,
     pub(super) save_error: Option<String>,
-    pub(super) selected: Option<(PathBuf, Snapshot)>,
+    pub(super) selected: Option<(PathBuf, Arc<Snapshot>)>,
     pub(super) comparison: Option<(PathBuf, Comparison)>,
     pending: Vec<Pending>,
 }
@@ -151,7 +151,7 @@ impl History {
     pub(super) fn select(&mut self, path: PathBuf) -> Result<(), String> {
         let snapshot = read_snapshot(&path)?;
         self.comparison = None;
-        self.selected = Some((path, snapshot));
+        self.selected = Some((path, Arc::new(snapshot)));
         Ok(())
     }
 

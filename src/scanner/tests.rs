@@ -1185,11 +1185,100 @@ fn scan_history_keeps_original_report_after_clear_and_reopens_after_restart() {
     for label in [
         "Scan history",
         "Practice scan",
+        "Review scan",
         "Print saved scan",
         "Readiness since clear",
     ] {
         assert!(labels.contains(label), "Missing {label}");
     }
+}
+
+#[test]
+fn reviewing_a_saved_scan_keeps_its_evidence_and_the_current_session_separate() {
+    let root = temp("review-saved-scan");
+    let mut app = Workbench::new(root.clone());
+    app.start_demo();
+    pump(&mut app);
+    app.read_emissions_scan();
+    pump(&mut app);
+    app.dispatch(vec![app.base_query(4, None)], None, ReadMode::Control);
+    pump(&mut app);
+    app.recheck_after_clear();
+    pump(&mut app);
+    app.read_freeze_frame();
+    pump(&mut app);
+    assert!(app.results.rows.values().any(|row| {
+        row.latest.reading.request == "03"
+            && row.latest.reading.value == "No codes reported by this ECU"
+    }));
+
+    let active_epoch = app.epoch;
+    let clear_at = app.results.clear_attempt_ms().unwrap();
+    app.scan_history.refresh(&root.join("scans"));
+    let path = app.scan_history.entries.as_ref().unwrap()[0].path.clone();
+    app.scan_history.select(path.clone()).unwrap();
+    app.page = Page::ScanHistory;
+    let ctx = render_context();
+    let draw = |app: &mut Workbench, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    };
+    let text_rect = |output: &egui::FullOutput, label: &str| {
+        output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == label => {
+                let rect = text.visual_bounding_rect();
+                shape
+                    .clip_rect
+                    .expand(1.0)
+                    .contains_rect(rect)
+                    .then_some(rect)
+            }
+            _ => None,
+        })
+    };
+    let click = |app: &mut Workbench, label: &str| {
+        let output = draw(app, vec![]);
+        let pointer = text_rect(&output, label)
+            .unwrap_or_else(|| panic!("Missing {label}"))
+            .center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: pointer,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        draw(app, vec![egui::Event::PointerMoved(pointer), button(true)]);
+        draw(app, vec![button(false)]);
+    };
+
+    click(&mut app, "Review scan");
+    assert_eq!(app.page, Page::ScanReview);
+    assert!(text_rect(&draw(&mut app, vec![]), "P0133").is_some());
+    click(&mut app, "Frame 0");
+    let frame = draw(&mut app, vec![]);
+    for label in ["Frame 0 · ECU 7E8", "Trigger code P0133", "88 °C"] {
+        assert!(text_rect(&frame, label).is_some(), "Missing {label}");
+    }
+    click(&mut app, "Readiness");
+    let readiness = draw(&mut app, vec![]);
+    for label in ["MIL On", "Since clear", "This drive cycle", "Incomplete"] {
+        assert!(text_rect(&readiness, label).is_some(), "Missing {label}");
+    }
+    click(&mut app, "Back to scan history");
+    assert_eq!(app.page, Page::ScanHistory);
+    assert_eq!(app.scan_history.selected.as_ref().unwrap().0, path);
+    assert_eq!(app.epoch, active_epoch);
+    assert_eq!(app.results.clear_attempt_ms(), Some(clear_at));
+    assert!(app.connected && app.demo && !app.busy);
 }
 
 #[test]

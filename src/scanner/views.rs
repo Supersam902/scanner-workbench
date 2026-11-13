@@ -23,7 +23,10 @@ fn action(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
     )
     .clicked()
 }
-fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
+pub(super) fn card<R>(
+    ui: &mut egui::Ui,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
     egui::Frame::new()
         .fill(SURFACE)
         .stroke(Stroke::new(1.0_f32, BORDER))
@@ -31,7 +34,7 @@ fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Inn
         .inner_margin(16)
         .show(ui, add)
 }
-fn caption(ui: &mut egui::Ui, text: &str) {
+pub(super) fn caption(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).small().color(MUTED));
 }
 
@@ -45,7 +48,7 @@ enum ValueTable {
     },
 }
 
-fn freeze_frame_link(ui: &mut egui::Ui, links: Links) -> Option<u8> {
+pub(super) fn freeze_frame_link(ui: &mut egui::Ui, links: Links) -> Option<u8> {
     match links {
         Links::Matching(frames) => {
             let mut selected = None;
@@ -88,7 +91,7 @@ fn freeze_frame_link(ui: &mut egui::Ui, links: Links) -> Option<u8> {
         }
     }
 }
-fn readiness_color(state: MonitorState) -> Color32 {
+pub(super) fn readiness_color(state: MonitorState) -> Color32 {
     match state {
         MonitorState::Ready => GREEN,
         MonitorState::NotReady | MonitorState::DisabledOrUnknown => AMBER,
@@ -150,7 +153,7 @@ fn reading_label(r: &Reading) -> &str {
         _ => &r.name,
     }
 }
-fn open_local(path: &std::path::Path) {
+pub(super) fn open_local(path: &std::path::Path) {
     #[cfg(windows)]
     {
         let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
@@ -163,6 +166,9 @@ fn open_local(path: &std::path::Path) {
 
 impl Workbench {
     pub(super) fn draw(&mut self, ctx: &egui::Context) {
+        if self.page != Page::ScanReview {
+            self.scan_review = None;
+        }
         egui::TopBottomPanel::top("scanner_header")
             .frame(
                 egui::Frame::new()
@@ -247,6 +253,10 @@ impl Workbench {
                     });
                 }
                 ui.add_space(8.0);
+                if self.page == Page::ScanReview {
+                    self.scan_review(ui);
+                    return;
+                }
                 egui::ScrollArea::vertical()
                     .id_salt(("workspace_scroll", self.page))
                     .auto_shrink([false, false])
@@ -263,6 +273,9 @@ impl Workbench {
                         Page::MonitorTests => self.monitor_tests(ui),
                         Page::Recordings => self.recordings(ui),
                         Page::ScanHistory => self.scan_history(ui),
+                        Page::ScanReview => {
+                            unreachable!("scan review scrolls its results below the controls")
+                        }
                         Page::Reports => self.reports(ui),
                         Page::Help => self.help(ui),
                         Page::Updates => self.update_controls(ui),
@@ -561,6 +574,7 @@ impl Workbench {
                     self.read_emissions_scan();
                 }
                 if let Some(scan) = &self.results.emissions_scan {
+                    let finished = scan.state != State::Running;
                     let status = if scan.state == State::Running && self.playback.is_some() {
                         "In progress at replay position"
                     } else {
@@ -568,12 +582,17 @@ impl Workbench {
                     };
                     caption(ui, status);
                     caption(ui, &recordings::recording_date(scan.started_ms));
-                    if scan.state != State::Running
-                        && ui
+                    if finished {
+                        if ui.button("Review scan").clicked()
+                            && let Some(snapshot) = self.latest_scan_snapshot()
+                        {
+                            self.open_scan_review(snapshot, Page::Home);
+                        }
+                        if ui
                             .add_enabled(!self.busy, egui::Button::new("Print scan report"))
                             .clicked()
-                    {
-                        if let Some(path) = self.export_latest_scan() {
+                            && let Some(path) = self.export_latest_scan()
+                        {
                             open_local(&path);
                         }
                     }
@@ -1167,10 +1186,17 @@ impl Workbench {
         self.description_for(&self.vehicle, code)
     }
     pub(super) fn description_for(&self, vehicle: &Vehicle, code: &str) -> String {
+        Self::describe_code(&self.db, vehicle, code)
+    }
+    pub(super) fn describe_code(
+        db: &crate::dtc_database::DtcDatabase,
+        vehicle: &Vehicle,
+        code: &str,
+    ) -> String {
         if code.len() != 5 {
             return "Raw ECU identifier; no OEM description mapped".into();
         }
-        if let Some((text, source)) = self.db.lookup_with_source(&vehicle.make, code) {
+        if let Some((text, source)) = db.lookup_with_source(&vehicle.make, code) {
             return format!("{text} [{}]", source.unwrap_or(&vehicle.make));
         }
         let generic = crate::dtc_descriptions::describe(code);
@@ -2859,13 +2885,14 @@ impl Workbench {
         let Some((_, snapshot)) = &self.scan_history.selected else {
             return;
         };
+        let snapshot = snapshot.clone();
         let Some(scan) = &snapshot.emissions_scan else {
             return;
         };
         ui.add_space(8.0);
-        let print = card(ui, |ui| {
+        let (review, print) = card(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            let print = ui
+            let actions = ui
                 .horizontal_wrapped(|ui| {
                     ui.strong(if snapshot.demo {
                         "Practice scan".into()
@@ -2873,7 +2900,10 @@ impl Workbench {
                         snapshot.vehicle.label()
                     });
                     caption(ui, &recordings::recording_date(scan.started_ms));
-                    action(ui, "Print saved scan", true)
+                    (
+                        action(ui, "Review scan", true),
+                        ui.button("Print saved scan").clicked(),
+                    )
                 })
                 .inner;
             ui.horizontal_wrapped(|ui| {
@@ -2901,9 +2931,12 @@ impl Workbench {
                         ui.end_row();
                     }
                 });
-            print
+            actions
         })
         .inner;
+        if review {
+            self.open_scan_review(snapshot, Page::ScanHistory);
+        }
         if print {
             if let Some(path) = self.export_saved_scan() {
                 open_local(&path);

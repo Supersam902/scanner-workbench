@@ -13,6 +13,7 @@ mod recordings;
 mod report_sections;
 mod scan_comparison;
 mod scan_history;
+mod scan_review;
 #[cfg(test)]
 mod tests;
 #[cfg(windows)]
@@ -56,6 +57,7 @@ pub enum Page {
     MonitorTests,
     Recordings,
     ScanHistory,
+    ScanReview,
     Reports,
     Help,
     Updates,
@@ -72,7 +74,7 @@ impl Page {
     ];
 
     #[cfg(test)]
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::Home,
         Self::Codes,
         Self::Live,
@@ -84,6 +86,7 @@ impl Page {
         Self::Systems,
         Self::Recordings,
         Self::ScanHistory,
+        Self::ScanReview,
         Self::Reports,
         Self::Connection,
         Self::Help,
@@ -94,7 +97,7 @@ impl Page {
         match self {
             Self::FreezeFrame | Self::MonitorTests => Self::Emissions,
             Self::Garage | Self::Systems => Self::VehicleInfo,
-            Self::Reports | Self::ScanHistory => Self::Recordings,
+            Self::Reports | Self::ScanHistory | Self::ScanReview => Self::Recordings,
             Self::Help | Self::Updates => Self::Connection,
             page => page,
         }
@@ -107,7 +110,7 @@ impl Page {
             Self::Live => "Live data",
             Self::Emissions | Self::FreezeFrame | Self::MonitorTests => "Emissions",
             Self::VehicleInfo | Self::Garage | Self::Systems => "Vehicle",
-            Self::Recordings | Self::Reports | Self::ScanHistory => "Saved work",
+            Self::Recordings | Self::Reports | Self::ScanHistory | Self::ScanReview => "Saved work",
             Self::Connection | Self::Help | Self::Updates => "Connection",
         }
     }
@@ -215,6 +218,7 @@ pub struct Workbench {
     scanning_emissions: bool,
     latest_scan: Option<Arc<Snapshot>>,
     scan_history: scan_history::History,
+    scan_review: Option<scan_review::Review>,
     scan_recovery_dir: String,
     monitor_support: Option<PidSupport>,
     oxygen_support: worker::OxygenCoverage,
@@ -367,6 +371,7 @@ impl Workbench {
             scanning_emissions: false,
             latest_scan: None,
             scan_history: Default::default(),
+            scan_review: None,
             scan_recovery_dir: String::new(),
             monitor_support: None,
             oxygen_support: Default::default(),
@@ -1477,16 +1482,22 @@ impl Workbench {
         if self.busy {
             return None;
         }
-        let result = if let Some(snapshot) = self.latest_scan.as_ref() {
-            self.save_report_html(snapshot, None, "scan-report")
-        } else {
-            let scan = self.results.emissions_scan.as_ref()?;
-            let capture = self.playback.as_ref()?;
-            let results = capture.replay(scan.ended_ms?);
-            let snapshot = Snapshot::from_emissions_scan(&self.vehicle, self.demo, &results)?;
-            self.save_report_html(&snapshot, None, "scan-report")
-        };
+        let snapshot = self.latest_scan_snapshot()?;
+        let result = self.save_report_html(&snapshot, None, "scan-report");
         self.report_saved(result)
+    }
+    fn latest_scan_snapshot(&self) -> Option<Arc<Snapshot>> {
+        if let Some(snapshot) = &self.latest_scan {
+            return Some(snapshot.clone());
+        }
+        let scan = self.results.emissions_scan.as_ref()?;
+        let capture = self.playback.as_ref()?;
+        let results = capture.replay(scan.ended_ms?);
+        Snapshot::from_emissions_scan(&capture.vehicle, capture.demo, &results).map(Arc::new)
+    }
+    fn open_scan_review(&mut self, snapshot: Arc<Snapshot>, from: Page) {
+        self.scan_review = Some(scan_review::Review::new(snapshot, from));
+        self.page = Page::ScanReview;
     }
     fn export_saved_scan(&mut self) -> Option<PathBuf> {
         let snapshot = &self.scan_history.selected.as_ref()?.1;

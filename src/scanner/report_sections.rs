@@ -1,5 +1,5 @@
 use super::codes::{Category, identifiers};
-use super::freeze_frames::{Frames, Links, predates_trigger, trigger_code};
+use super::freeze_frames::{Frame, Frames, Links, predates_trigger, trigger_code};
 use super::model::{Snapshot, Stamped, ecu_label, html_escape, unit_label};
 use super::readiness::{self, EcuReport, MonitorState, Period};
 use crate::diagnostics::Reading;
@@ -34,8 +34,77 @@ fn report_note(html: &mut String, text: &str) {
     );
 }
 
-fn verified(snapshot: &Snapshot, row: &Stamped) -> bool {
+pub(super) fn verified(snapshot: &Snapshot, row: &Stamped) -> bool {
     !super::model::unavailable(&row.reading) && qualification(snapshot, row).is_none()
+}
+
+pub(super) fn code_results(
+    snapshot: &Snapshot,
+    category: Category,
+) -> impl Iterator<Item = &Stamped> {
+    snapshot
+        .rows
+        .iter()
+        .filter(move |row| row.reading.request == category.request())
+}
+
+pub(super) fn read_issues<'a>(
+    snapshot: &'a Snapshot,
+    request: &'static str,
+) -> impl Iterator<Item = &'a Stamped> {
+    snapshot
+        .failures
+        .iter()
+        .filter(move |row| row.reading.request == request)
+}
+
+pub(super) fn frame_value(reading: &Reading) -> String {
+    let value = reading
+        .value
+        .parse::<f64>()
+        .ok()
+        .filter(|_| reading.numeric.is_some())
+        .map_or_else(
+            || reading.value.clone(),
+            |number| {
+                let rounded = format!("{number:.2}");
+                if number != 0.0 && rounded.parse() == Ok(0.0) {
+                    reading.value.clone()
+                } else {
+                    rounded
+                        .trim_end_matches('0')
+                        .trim_end_matches('.')
+                        .to_owned()
+                }
+            },
+        );
+    let unit = unit_label(&reading.unit);
+    if unit.is_empty() {
+        value
+    } else {
+        format!("{value} {unit}")
+    }
+}
+
+pub(super) fn frame_reading_qualification(
+    snapshot: &Snapshot,
+    capture: &Frame<'_>,
+    row: &Stamped,
+) -> Option<&'static str> {
+    qualification(snapshot, row).or_else(|| {
+        if verified(snapshot, row)
+            && predates_trigger(row, capture.trigger.map(|trigger| trigger.at_ms))
+        {
+            Some("Before latest trigger read")
+        } else if capture
+            .trigger
+            .is_none_or(|trigger| !verified(snapshot, trigger))
+        {
+            Some("Frame trigger unverified")
+        } else {
+            None
+        }
+    })
 }
 
 pub(super) fn append(html: &mut String, snapshot: &Snapshot, describe: &impl Fn(&str) -> String) {
@@ -87,11 +156,7 @@ fn append_codes(
     html.push_str("<section><h2>Trouble codes</h2><table class=\"codes\"><thead><tr><th>ECU</th><th>Category</th><th>Code</th><th>Description or result</th><th>Freeze frame</th></tr></thead><tbody>");
     for category in Category::ALL {
         let mut read = false;
-        for row in snapshot
-            .rows
-            .iter()
-            .filter(|row| row.reading.request == category.request())
-        {
+        for row in code_results(snapshot, category) {
             read = true;
             let reading = &row.reading;
             let ecu = ecu_label(reading.source);
@@ -130,11 +195,7 @@ fn append_codes(
                 );
             }
         }
-        for failure in snapshot
-            .failures
-            .iter()
-            .filter(|row| row.reading.request == category.request())
-        {
+        for failure in read_issues(snapshot, category.request()) {
             read = true;
             let _ = write!(
                 html,
@@ -202,48 +263,19 @@ fn append_frames(html: &mut String, snapshot: &Snapshot, Frames { by_ecu, discov
             continue;
         }
         html.push_str("<table class=\"frame-values\"><thead><tr><th>Parameter</th><th>Captured value</th></tr></thead><tbody>");
-        for row in capture.readings {
+        for row in &capture.readings {
             let reading = &row.reading;
-            let value = reading
-                .value
-                .parse::<f64>()
-                .ok()
-                .filter(|_| reading.numeric.is_some())
-                .map_or_else(
-                    || reading.value.clone(),
-                    |number| {
-                        let rounded = format!("{number:.2}");
-                        if number != 0.0 && rounded.parse() == Ok(0.0) {
-                            reading.value.clone()
-                        } else {
-                            rounded
-                                .trim_end_matches('0')
-                                .trim_end_matches('.')
-                                .to_owned()
-                        }
-                    },
-                );
             let _ = write!(
                 html,
-                "<tr><th scope=\"row\">{}</th><td>{} {}",
+                "<tr><th scope=\"row\">{}</th><td>{}",
                 html_escape(&reading.name),
-                html_escape(&value),
-                html_escape(unit_label(&reading.unit))
+                html_escape(&frame_value(reading))
             );
             if super::model::unavailable(reading) {
                 report_note(html, &reading.status);
             }
-            if let Some(state) = qualification(snapshot, row) {
+            if let Some(state) = frame_reading_qualification(snapshot, &capture, row) {
                 report_note(html, state);
-            } else if verified(snapshot, row)
-                && predates_trigger(row, capture.trigger.map(|trigger| trigger.at_ms))
-            {
-                report_note(html, "Before latest trigger read");
-            } else if capture
-                .trigger
-                .is_some_and(|trigger| !verified(snapshot, trigger))
-            {
-                report_note(html, "Frame trigger unverified");
             }
             html.push_str("</td></tr>");
         }
@@ -254,21 +286,7 @@ fn append_frames(html: &mut String, snapshot: &Snapshot, Frames { by_ecu, discov
 
 fn append_readiness(html: &mut String, snapshot: &Snapshot) {
     html.push_str("<section><h2>Emissions readiness</h2>");
-    let reports = |period| {
-        readiness::reports(
-            snapshot.rows.iter(),
-            snapshot.failures.iter(),
-            period,
-            |row| snapshot.predates_clear(row) || snapshot.predates_scan(row),
-            |row| snapshot.refresh_failed(row),
-        )
-        .into_iter()
-        .map(|report| (report.source, report))
-        .collect::<BTreeMap<_, _>>()
-    };
-    let since = reports(Period::SinceClear);
-    let cycle = reports(Period::DriveCycle);
-    let sources: BTreeSet<_> = since.keys().chain(cycle.keys()).copied().collect();
+    let reports = readiness_reports(snapshot);
     let mut failures = snapshot
         .failures
         .iter()
@@ -281,22 +299,25 @@ fn append_readiness(html: &mut String, snapshot: &Snapshot) {
             Some((period, row))
         })
         .peekable();
-    if sources.is_empty() && failures.peek().is_none() {
+    if reports.is_empty() && failures.peek().is_none() {
         html.push_str("<p>Readiness has not been read.</p></section>");
         return;
     }
 
-    for source in sources {
-        let since_clear = since.get(&source);
-        let drive_cycle = cycle.get(&source);
+    for (source, periods) in reports {
+        let [since_clear, drive_cycle] = periods.each_ref().map(Option::as_ref);
         let _ = write!(html, "<h3>ECU {}</h3>", ecu_label(source));
         if let Some(report) = since_clear.filter(|report| report.latest.is_some()) {
             let _ = write!(
                 html,
-                "<p><strong>MIL {}</strong> · Confirmed DTCs {}</p>",
+                "<p><strong>MIL {}</strong> · Confirmed DTCs {}",
                 html_escape(report.mil.unwrap_or("unavailable")),
                 html_escape(report.dtc_count.unwrap_or("unavailable"))
             );
+            if let Some(state) = readiness_qualification(snapshot, report) {
+                report_note(html, state);
+            }
+            html.push_str("</p>");
         }
         let _ = write!(
             html,
@@ -307,7 +328,7 @@ fn append_readiness(html: &mut String, snapshot: &Snapshot) {
         let status = |report: Option<&EcuReport<'_>>| match report {
             Some(report) => report.latest.map_or_else(
                 || "Unavailable".into(),
-                |row| {
+                |_| {
                     let summary = if report.monitors.is_empty() {
                         "No monitor states reported".into()
                     } else {
@@ -331,7 +352,7 @@ fn append_readiness(html: &mut String, snapshot: &Snapshot) {
                         parts.join(" · ")
                     };
                     let mut result = format!("<strong>{summary}</strong>");
-                    if let Some(state) = qualification(snapshot, row) {
+                    if let Some(state) = readiness_qualification(snapshot, report) {
                         report_note(&mut result, state);
                     }
                     result
@@ -346,19 +367,7 @@ fn append_readiness(html: &mut String, snapshot: &Snapshot) {
             status(drive_cycle)
         );
 
-        let mut monitors = BTreeMap::new();
-        for monitor in since_clear.into_iter().flat_map(|report| &report.monitors) {
-            monitors.entry(monitor.name).or_insert((None, None)).0 = Some(monitor.state);
-        }
-        for monitor in drive_cycle.into_iter().flat_map(|report| &report.monitors) {
-            monitors.entry(monitor.name).or_insert((None, None)).1 = Some(monitor.state);
-        }
-        for (name, (since, cycle)) in monitors {
-            if since == Some(MonitorState::Unsupported)
-                && matches!(cycle, None | Some(MonitorState::Unsupported))
-            {
-                continue;
-            }
+        for (name, [since, cycle]) in readiness_monitors([since_clear, drive_cycle]) {
             let _ = write!(
                 html,
                 "<tr><th scope=\"row\">{}</th><td>{}</td><td>{}</td></tr>",
@@ -385,6 +394,55 @@ fn append_readiness(html: &mut String, snapshot: &Snapshot) {
     html.push_str("<p>The ECU reports completion status. Whether a monitor is actively running is unknown.</p></section>");
 }
 
+pub(super) fn readiness_reports(
+    snapshot: &Snapshot,
+) -> BTreeMap<Option<u32>, [Option<EcuReport<'_>>; 2]> {
+    let mut reports = BTreeMap::new();
+    for (index, period) in [Period::SinceClear, Period::DriveCycle]
+        .into_iter()
+        .enumerate()
+    {
+        for report in readiness::reports(
+            snapshot.rows.iter(),
+            snapshot.failures.iter(),
+            period,
+            |row| snapshot.predates_clear(row) || snapshot.predates_scan(row),
+            |row| snapshot.refresh_failed(row),
+        ) {
+            let periods = reports.entry(report.source).or_insert([None, None]);
+            periods[index] = Some(report);
+        }
+    }
+    reports
+}
+
+pub(super) fn readiness_monitors<'a>(
+    reports: [Option<&EcuReport<'a>>; 2],
+) -> impl Iterator<Item = (&'a str, [Option<MonitorState>; 2])> {
+    let mut monitors = BTreeMap::new();
+    for (index, report) in reports.into_iter().enumerate() {
+        for monitor in report.into_iter().flat_map(|report| &report.monitors) {
+            monitors.entry(monitor.name).or_insert([None, None])[index] = Some(monitor.state);
+        }
+    }
+    monitors.into_iter().filter(|(_, [since, cycle])| {
+        *since != Some(MonitorState::Unsupported)
+            || !matches!(cycle, None | Some(MonitorState::Unsupported))
+    })
+}
+
+pub(super) fn readiness_qualification(
+    snapshot: &Snapshot,
+    report: &EcuReport<'_>,
+) -> Option<&'static str> {
+    report
+        .latest
+        .and_then(|row| qualification(snapshot, row))
+        .or(report
+            .refresh_failed
+            .then_some("Readiness result unverified"))
+}
+
 fn monitor_count(report: &EcuReport<'_>, state: MonitorState) -> usize {
     report
         .monitors
@@ -393,7 +451,7 @@ fn monitor_count(report: &EcuReport<'_>, state: MonitorState) -> usize {
         .count()
 }
 
-fn monitor_status(state: Option<MonitorState>) -> &'static str {
+pub(super) fn monitor_status(state: Option<MonitorState>) -> &'static str {
     match state {
         Some(state) => state.completion_label(),
         None => "No result",
