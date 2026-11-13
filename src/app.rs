@@ -103,6 +103,7 @@ pub enum OdbCmd {
     ReadFreezeFrame,
     ReadVin,
     QuerySupportedPids,
+    Diagnostics(crate::diagnostics::Job),
     SetPollConfig(PollConfig),
     Shutdown,
 }
@@ -138,7 +139,16 @@ pub enum PollMode {
 }
 
 #[derive(Debug, Clone)]
+pub struct DtcScanResult {
+    /// None means this category failed; keep its previous displayed result.
+    pub stored: Option<Vec<Dtc>>,
+    pub pending: Option<Vec<Dtc>>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub enum ObdEvent {
+    Diagnostics(crate::diagnostics::Update),
     Connecting(String),
     Reconnecting(String),
     Connected(ConnectionInfo),
@@ -151,14 +161,11 @@ pub enum ObdEvent {
         unit: String,
         raw: String,
     },
-    DtcResult {
-        stored: Vec<Dtc>,
-        pending: Vec<Dtc>,
-    },
+    DtcResult(DtcScanResult),
     /// Descriptions enriched in background — replaces DtcResult lists silently.
-    DtcDescriptionsReady {
-        stored: Vec<Dtc>,
-        pending: Vec<Dtc>,
+    DtcDescriptionsReady(DtcScanResult),
+    LiveDataHealth {
+        responding: bool,
     },
     FreezeFrameData {
         pid_cmd: String,
@@ -177,6 +184,8 @@ pub enum ObdEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    GenericObd,
+    Toyota,
     Dashboard,
     Sensors,
     DtcCodes,
@@ -187,6 +196,7 @@ pub enum Tab {
 // ── App State ───────────────────────────────────────────────────────────────
 
 pub struct ObdApp {
+    diagnostics: crate::diagnostics::Panel,
     // Communication
     cmd_tx: mpsc::Sender<OdbCmd>,
     event_rx: mpsc::Receiver<ObdEvent>,
@@ -199,6 +209,7 @@ pub struct ObdApp {
     reconnecting: bool,
     connection_info: Option<ConnectionInfo>,
     connection_status: String,
+    live_data_unavailable: bool,
 
     #[cfg(not(target_arch = "wasm32"))]
     connection_kind: ConnectionKind,
@@ -235,6 +246,7 @@ pub struct ObdApp {
     stored_dtcs: Vec<Dtc>,
     pending_dtcs: Vec<Dtc>,
     dtc_status: String,
+    dtc_scan_complete: bool,
     clear_dtc_confirm: bool,
     #[cfg(not(target_arch = "wasm32"))]
     freematics_dtcs: [FreematicsDtcScan; 3],
@@ -685,7 +697,16 @@ impl ObdApp {
 
         let pid_defs = obd::mode01_pids();
         #[cfg(not(target_arch = "wasm32"))]
-        let initial_connection_kind = if available_ports
+        let installed_j2534 = crate::j2534::discover_drivers();
+        #[cfg(not(target_arch = "wasm32"))]
+        let preferred_mfc3 = installed_j2534
+            .iter()
+            .find(|driver| driver.name.to_ascii_uppercase().contains("MFC3"))
+            .map(|driver| driver.path.to_string_lossy().into_owned());
+        #[cfg(not(target_arch = "wasm32"))]
+        let initial_connection_kind = if preferred_mfc3.is_some() {
+            ConnectionKind::J2534
+        } else if available_ports
             .iter()
             .any(|port| is_usb_serial_port_name(port))
         {
@@ -695,6 +716,7 @@ impl ObdApp {
         };
 
         Self {
+            diagnostics: crate::diagnostics::Panel::default(),
             cmd_tx,
             event_rx,
             #[cfg(not(target_arch = "wasm32"))]
@@ -704,18 +726,19 @@ impl ObdApp {
             reconnecting: false,
             connection_info: None,
             connection_status: "Disconnected".to_string(),
+            live_data_unavailable: false,
             #[cfg(not(target_arch = "wasm32"))]
             connection_kind: initial_connection_kind,
             #[cfg(not(target_arch = "wasm32"))]
             tcp_address: String::new(),
             #[cfg(not(target_arch = "wasm32"))]
-            j2534_library: String::new(),
+            j2534_library: preferred_mfc3.unwrap_or_default(),
             #[cfg(not(target_arch = "wasm32"))]
             j2534_protocol: crate::j2534::CanProtocol::default(),
             #[cfg(not(target_arch = "wasm32"))]
             j2534_ecu_address: 0x10,
             #[cfg(not(target_arch = "wasm32"))]
-            j2534_drivers: crate::j2534::discover_drivers(),
+            j2534_drivers: installed_j2534,
             #[cfg(not(target_arch = "wasm32"))]
             elm_can_mode: crate::elm327::ElmCanMode::Auto,
             available_ports,
@@ -732,6 +755,7 @@ impl ObdApp {
             stored_dtcs: Vec::new(),
             pending_dtcs: Vec::new(),
             dtc_status: String::new(),
+            dtc_scan_complete: false,
             clear_dtc_confirm: false,
             #[cfg(not(target_arch = "wasm32"))]
             freematics_dtcs: std::array::from_fn(|_| FreematicsDtcScan::default()),
@@ -776,7 +800,7 @@ impl ObdApp {
             freematics_reader_drops: 0,
             #[cfg(not(target_arch = "wasm32"))]
             freematics_corrupt_records: 0,
-            active_tab: Tab::Dashboard,
+            active_tab: Tab::Toyota,
             log_messages: Vec::new(),
             log_auto_scroll: true,
             log_panel_open: true,
@@ -795,7 +819,12 @@ impl ObdApp {
     fn process_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
+                ObdEvent::Diagnostics(update) => self.diagnostics.update(update),
                 ObdEvent::Connecting(msg) => {
+                    if !self.connecting {
+                        self.diagnostics.reset();
+                    }
+                    self.live_data_unavailable = false;
                     self.reconnecting = false;
                     if !self.connecting {
                         self.connected = false;
@@ -839,6 +868,7 @@ impl ObdApp {
                         self.stored_dtcs.clear();
                         self.pending_dtcs.clear();
                         self.dtc_status.clear();
+                        self.dtc_scan_complete = false;
                         self.freeze_data.clear();
                         self.freeze_frame_read = false;
                         self.clear_dtc_confirm = false;
@@ -874,6 +904,8 @@ impl ObdApp {
                     self.add_log(&format!("[CONNECT_FAILED] {msg}"));
                 }
                 ObdEvent::Disconnected => {
+                    self.diagnostics.reset();
+                    self.live_data_unavailable = false;
                     self.connected = false;
                     self.connecting = false;
                     self.reconnecting = false;
@@ -979,26 +1011,17 @@ impl ObdApp {
                         state.history.remove(0);
                     }
                 }
-                ObdEvent::DtcResult { stored, pending } => {
-                    if stored.is_empty() && pending.is_empty() {
-                        self.dtc_status = "No trouble codes found".to_string();
-                        self.add_log("[DTC_SCAN] No DTCs found");
-                    } else {
-                        self.dtc_status =
-                            format!("{} stored, {} pending", stored.len(), pending.len());
-                        for dtc in &stored {
-                            self.add_log(&format!("[DTC_STORED] code={}", dtc.code));
-                        }
-                        for dtc in &pending {
-                            self.add_log(&format!("[DTC_PENDING] code={}", dtc.code));
-                        }
+                ObdEvent::DtcResult(result) => self.apply_dtc_scan(result, false),
+                ObdEvent::DtcDescriptionsReady(result) => self.apply_dtc_scan(result, true),
+                ObdEvent::LiveDataHealth { responding } => {
+                    if self.live_data_unavailable == responding {
+                        self.add_log(if responding {
+                            "[LIVE_DATA] Vehicle data resumed"
+                        } else {
+                            "[ERROR] No live ECU data received; check ignition and adapter"
+                        });
                     }
-                    self.stored_dtcs = stored;
-                    self.pending_dtcs = pending;
-                }
-                ObdEvent::DtcDescriptionsReady { stored, pending } => {
-                    self.stored_dtcs = stored;
-                    self.pending_dtcs = pending;
+                    self.live_data_unavailable = !responding;
                 }
                 ObdEvent::FreezeFrameData {
                     pid_cmd,
@@ -1041,6 +1064,38 @@ impl ObdApp {
             for frame in frames {
                 self.apply_freematics_frame(frame);
             }
+        }
+    }
+
+    fn apply_dtc_scan(&mut self, result: DtcScanResult, enriched: bool) {
+        if !enriched {
+            self.dtc_scan_complete =
+                result.stored.is_some() && result.pending.is_some() && result.warnings.is_empty();
+        }
+        if let Some(stored) = result.stored {
+            self.stored_dtcs = stored;
+        }
+        if let Some(pending) = result.pending {
+            self.pending_dtcs = pending;
+        }
+        if !enriched {
+            self.dtc_status = if result.warnings.is_empty() {
+                if self.stored_dtcs.is_empty() && self.pending_dtcs.is_empty() {
+                    "No trouble codes found".into()
+                } else {
+                    format!(
+                        "{} stored, {} pending",
+                        self.stored_dtcs.len(),
+                        self.pending_dtcs.len()
+                    )
+                }
+            } else {
+                format!(
+                    "Incomplete scan / operation failed — failed categories retain previous results: {}",
+                    result.warnings.join("; ")
+                )
+            };
+            self.add_log(&format!("[DTC_SCAN] {}", self.dtc_status));
         }
     }
 
@@ -1338,6 +1393,9 @@ impl ObdApp {
     }
 
     fn send_cmd(&self, cmd: OdbCmd) {
+        if matches!(&cmd, OdbCmd::Disconnect | OdbCmd::Shutdown) {
+            self.diagnostics.cancel();
+        }
         let _ = self.cmd_tx.send(cmd);
     }
 
@@ -1366,7 +1424,7 @@ impl ObdApp {
     fn engine_running(&self) -> bool {
         self.live_data
             .get("010C")
-            .is_some_and(|s| s.numeric_value > 0.0)
+            .is_some_and(|s| !self.pid_is_stale("010C", s) && s.numeric_value > 0.0)
     }
 
     fn displayed_age_ms(state: &LivePidState) -> Option<u128> {
@@ -1380,10 +1438,22 @@ impl ObdApp {
     }
 
     fn pid_is_stale(&self, pid: &str, state: &LivePidState) -> bool {
-        if !self.is_freematics_usb() {
-            return false;
-        }
-        let limit = if pid == "010C" || pid == "010D" {
+        let limit = if !self.is_freematics_usb() {
+            let count = match self.poll_config.mode {
+                PollMode::Minimal => 4,
+                PollMode::Fast => 7,
+                PollMode::Full => 21,
+            };
+            // Allow a normal full polling sweep, including user-selected delays.
+            5000u64.max(
+                self.poll_config.cycle_delay_ms.saturating_add(
+                    self.poll_config
+                        .inter_pid_delay_ms
+                        .saturating_add(250)
+                        .saturating_mul(count),
+                ),
+            ) as u128
+        } else if pid == "010C" || pid == "010D" {
             250
         } else {
             1000
@@ -1392,7 +1462,7 @@ impl ObdApp {
     }
 
     fn show_pid_age(&self, ui: &mut egui::Ui, pid: &str, state: &LivePidState) {
-        if self.is_freematics_usb() {
+        {
             let age = Self::displayed_age_ms(state);
             let text = match age {
                 Some(age) if !self.pid_is_stale(pid, state) => format!("Freshness age: {age} ms"),
@@ -1411,6 +1481,24 @@ impl ObdApp {
     }
 
     fn show_engine_warning(&self, ui: &mut egui::Ui) {
+        if self.live_running && self.live_data_unavailable {
+            ui.colored_label(
+                Color32::from_rgb(220, 170, 80),
+                "No live ECU data — readings may be stale. Check ignition and adapter.",
+            );
+            return;
+        }
+        if self
+            .live_data
+            .get("010C")
+            .is_some_and(|state| self.pid_is_stale("010C", state))
+        {
+            ui.colored_label(
+                Color32::from_rgb(220, 170, 80),
+                "RPM reading is out of date; engine state is unknown.",
+            );
+            return;
+        }
         if self.live_running && !self.engine_running() && !self.live_data.is_empty() {
             ui.horizontal(|ui| {
                 ui.label(
@@ -1425,6 +1513,7 @@ impl ObdApp {
     // ── UI Sections ─────────────────────────────────────────────────────────
 
     fn connect_selected(&self) {
+        self.diagnostics.cancel();
         #[cfg(not(target_arch = "wasm32"))]
         match self.connection_kind {
             ConnectionKind::Tcp => {
@@ -1560,8 +1649,8 @@ impl ObdApp {
                         ui.add(egui::DragValue::new(&mut self.j2534_ecu_address).hexadecimal(2, false, true))
                             .on_hover_text("29-bit response source address in hex. Default 10; set from vehicle documentation. This connection queries one ECU.");
                     }
-                    ui.label("04.04 driver; standard CAN diagnostics only")
-                        .on_hover_text("Driver must match the app's 32/64-bit architecture. Legacy protocols, manufacturer modules and PSA-specific drivers are not yet supported by this backend.");
+                    ui.label("04.04 driver; CAN / ISO 9141 / KWP2000")
+                        .on_hover_text("Driver must match the app's 32/64-bit architecture. Select the vehicle protocol explicitly. Manufacturer data reads are in Vehicle Diagnostics. Legacy paths require physical validation; PSA-specific drivers are not supported.");
                     return;
                 }
                 ConnectionKind::Serial => {}
@@ -1608,7 +1697,9 @@ impl ObdApp {
             } else {
                 (Color32::from_rgb(180, 50, 50), "Disconnected")
             };
-            ui.colored_label(status_color, "●");
+            let (indicator, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+            ui.painter()
+                .circle_filled(indicator.center(), 4.0, status_color);
             ui.label(
                 RichText::new(status_text)
                     .strong()
@@ -1641,11 +1732,10 @@ impl ObdApp {
                     }
                 });
             } else if !self.connecting {
-                self.show_adapter_selector(ui);
-
                 if ui.button(RichText::new("Connect").strong()).clicked() {
                     self.connect_selected();
                 }
+                self.show_adapter_selector(ui);
 
                 #[cfg(any(target_arch = "wasm32", debug_assertions))]
                 {
@@ -1675,11 +1765,19 @@ impl ObdApp {
                     .small(),
             );
         }
+        if self.connected && self.live_running && self.live_data_unavailable {
+            ui.colored_label(
+                Color32::from_rgb(220, 170, 80),
+                "No live ECU data — check ignition and adapter.",
+            );
+        }
     }
 
     fn show_tab_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let tabs = [
+                (Tab::Toyota, "Vehicle Diagnostics"),
+                (Tab::GenericObd, "Generic OBD-II"),
                 (Tab::Dashboard, "Dashboard"),
                 (Tab::Sensors, "Sensors"),
                 (Tab::DtcCodes, "DTCs"),
@@ -1715,9 +1813,9 @@ impl ObdApp {
 
                 // Log toggle
                 let log_label = if self.log_panel_open {
-                    RichText::new("Log ▼").color(Color32::from_rgb(80, 160, 220))
+                    RichText::new("Hide log").color(Color32::from_rgb(80, 160, 220))
                 } else {
-                    RichText::new("Log ▲").color(Color32::from_gray(160))
+                    RichText::new("Show log").color(Color32::from_gray(160))
                 };
                 if ui
                     .selectable_label(self.log_panel_open, log_label)
@@ -1730,6 +1828,7 @@ impl ObdApp {
     }
 
     fn start_polling(&mut self) {
+        self.live_data_unavailable = false;
         self.live_data.clear();
         self.send_cmd(OdbCmd::SetPollConfig(self.poll_config.clone()));
         self.send_cmd(OdbCmd::StartLiveData);
@@ -2724,12 +2823,14 @@ impl ObdApp {
 
                     ui.add_space(12.0);
                 }
-            } else if !self.dtc_status.is_empty() {
+            } else if self.dtc_scan_complete {
                 ui.label(
                     RichText::new("No trouble codes found")
                         .color(Color32::from_rgb(50, 200, 80))
                         .size(16.0),
                 );
+            } else if !self.dtc_status.is_empty() {
+                ui.colored_label(Color32::from_rgb(220, 170, 80), "Scan incomplete — absence of trouble codes has not been confirmed.");
             }
         });
     }
@@ -3264,6 +3365,27 @@ impl eframe::App for ObdApp {
         } else {
             ctx.set_visuals(egui::Visuals::light());
         }
+        if self.active_tab == Tab::Toyota {
+            ctx.style_mut(|style| {
+                style.spacing.item_spacing = egui::vec2(8.0, 7.0);
+                style
+                    .text_styles
+                    .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+                style
+                    .text_styles
+                    .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
+                style
+                    .text_styles
+                    .insert(egui::TextStyle::Heading, egui::FontId::proportional(21.0));
+                if self.dark_mode {
+                    style.visuals.panel_fill = Color32::from_rgb(19, 29, 42);
+                    style.visuals.override_text_color = Some(Color32::from_rgb(221, 229, 239));
+                    style.visuals.window_fill = Color32::from_rgb(25, 38, 53);
+                    style.visuals.extreme_bg_color = Color32::from_rgb(13, 21, 31);
+                    style.visuals.selection.bg_fill = Color32::from_rgb(34, 91, 143);
+                }
+            });
+        }
 
         egui::TopBottomPanel::top("connection_bar").show(ctx, |ui| {
             ui.add_space(4.0);
@@ -3287,6 +3409,35 @@ impl eframe::App for ObdApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
+            Tab::GenericObd | Tab::Toyota => {
+                let can = self
+                    .connection_info
+                    .as_ref()
+                    .map(|info| info.protocol.contains("CAN"))
+                    .unwrap_or_else(|| {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            self.connection_kind != ConnectionKind::J2534
+                                || self.j2534_protocol.is_can()
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            true
+                        }
+                    });
+                if let Some(job) = self.diagnostics.show(
+                    ui,
+                    self.active_tab == Tab::Toyota,
+                    self.connected && !self.is_freematics_usb(),
+                    can,
+                ) {
+                    if self.live_running {
+                        self.stop_polling();
+                    }
+                    self.send_cmd(OdbCmd::Diagnostics(job));
+                }
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
             Tab::Dashboard => self.show_dashboard(ui),
             Tab::Sensors => self.show_sensors(ui),
             Tab::DtcCodes => self.show_dtcs(ui),
@@ -3340,6 +3491,108 @@ impl eframe::App for ObdApp {
 mod adapter_ui_tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn failed_or_partial_dtc_scans_preserve_failed_categories_including_enrichment() {
+        let (commands, _) = mpsc::channel();
+        let (_, event_rx) = mpsc::channel();
+        let (_, telemetry_rx) = mpsc::channel();
+        let mut app = ObdApp::new_state(commands, event_rx, telemetry_rx, None);
+        app.stored_dtcs = obd::parse_dtc_response_lines(&["43010133".into()], "43");
+        app.pending_dtcs = app.stored_dtcs.clone();
+        let partial = DtcScanResult {
+            stored: Some(Vec::new()),
+            pending: None,
+            warnings: vec!["Pending scan timed out".into()],
+        };
+        app.apply_dtc_scan(partial.clone(), false);
+        app.apply_dtc_scan(partial, true);
+        assert!(app.stored_dtcs.is_empty());
+        assert_eq!(app.pending_dtcs[0].code, "P0133");
+        assert!(!app.dtc_scan_complete);
+        assert!(app.dtc_status.contains("Incomplete"));
+        app.apply_dtc_scan(
+            DtcScanResult {
+                stored: None,
+                pending: None,
+                warnings: vec!["Clear rejected".into()],
+            },
+            false,
+        );
+        assert_eq!(app.pending_dtcs[0].code, "P0133");
+        assert!(app.dtc_status.contains("Clear rejected"));
+        app.apply_dtc_scan(
+            DtcScanResult {
+                stored: Some(Vec::new()),
+                pending: Some(Vec::new()),
+                warnings: Vec::new(),
+            },
+            false,
+        );
+        assert!(app.dtc_scan_complete);
+        assert!(app.pending_dtcs.is_empty());
+        assert_eq!(app.dtc_status, "No trouble codes found");
+    }
+
+    #[test]
+    fn incomplete_empty_dtc_scan_does_not_render_a_clean_bill_of_health() {
+        let (commands, _) = mpsc::channel();
+        let (_, event_rx) = mpsc::channel();
+        let (_, telemetry_rx) = mpsc::channel();
+        let mut app = ObdApp::new_state(commands, event_rx, telemetry_rx, None);
+        app.connection_kind = ConnectionKind::J2534;
+        app.connected = true;
+        app.apply_dtc_scan(
+            DtcScanResult {
+                stored: None,
+                pending: None,
+                warnings: vec!["Timeout".into()],
+            },
+            false,
+        );
+        let text = rendered_freematics_dtcs(&mut app, &egui::Context::default());
+        assert!(text.contains("Scan incomplete"));
+        assert!(!text.contains("No trouble codes found"));
+    }
+
+    #[test]
+    fn j2534_gauges_age_and_health_recovers_after_successful_polling() {
+        let (commands, _) = mpsc::channel();
+        let (events, event_rx) = mpsc::channel();
+        let (_, telemetry_rx) = mpsc::channel();
+        let mut app = ObdApp::new_state(commands, event_rx, telemetry_rx, None);
+        app.connection_kind = ConnectionKind::J2534;
+        app.live_running = true;
+        events
+            .send(ObdEvent::LiveData {
+                pid_cmd: "010C".into(),
+                name: "RPM".into(),
+                value: ObdValue::Numeric(1700.0),
+                unit: "RPM".into(),
+                raw: "410C1A90".into(),
+            })
+            .unwrap();
+        app.process_events();
+        assert!(!app.pid_is_stale("010C", &app.live_data["010C"]));
+        app.live_data.get_mut("010C").unwrap().received_at =
+            Instant::now() - Duration::from_secs(60);
+        assert!(app.pid_is_stale("010C", &app.live_data["010C"]));
+        assert!(!app.engine_running());
+        events
+            .send(ObdEvent::LiveDataHealth { responding: false })
+            .unwrap();
+        app.process_events();
+        assert!(app.live_data_unavailable);
+        events
+            .send(ObdEvent::LiveDataHealth { responding: true })
+            .unwrap();
+        app.process_events();
+        assert!(!app.live_data_unavailable);
+        // A slow user-selected polling cycle must not immediately mark valid
+        // readings stale; the bound includes the configured cycle delay.
+        app.poll_config.cycle_delay_ms = 120_000;
+        assert!(!app.pid_is_stale("010C", &app.live_data["010C"]));
+    }
 
     fn rendered_freematics_dtcs(app: &mut ObdApp, context: &egui::Context) -> String {
         let output = context.run(

@@ -1522,6 +1522,14 @@ pub fn parse_dtc_response_lines(lines: &[String], response_prefix: &str) -> Vec<
     codes
 }
 
+pub fn valid_vin(vin: &str) -> bool {
+    let vin = vin.trim();
+    vin.len() == 17
+        && vin
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() && !b"IOQ".contains(&b.to_ascii_uppercase()))
+}
+
 /// Parse multi-line encoded string response (VIN, Calibration ID, etc.)
 ///
 /// ELM327 multi-frame responses (ISO-TP) come in several formats:

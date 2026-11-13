@@ -1,0 +1,19 @@
+OBDb signal data attribution
+
+Sources:
+https://github.com/OBDb/SAEJ1979/blob/main/signalsets/v3/default.json
+https://github.com/OBDb/Toyota-Corolla/blob/main/signalsets/v3/default.json
+https://github.com/OBDb/Toyota-Corolla/blob/main/tests/test_cases/2012/command_support.yaml
+
+Retrieved 2026-10-22. Copyright OBDb contributors.
+License: Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0).
+https://creativecommons.org/licenses/by-sa/4.0/
+Full license: LICENSE-CC-BY-SA-4.0.txt.
+
+The original JSON and support data are retained unmodified. Runtime import,
+selection, decoding and UI code are separate from these data files. Adaptations
+to the licensed data must retain attribution and the applicable share-alike terms.
+No Toyota proprietary software, firmware, calibration files or subscription data
+are included. Community definitions are not proof of support on a specific ECU.
+
+Capture fixtures also retained from Toyota-Corolla/tests/test_cases/2012/commands/7E0.7E8.2182.yaml and 7E0.7E8.2145.yaml under the same license.

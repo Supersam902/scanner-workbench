@@ -4,8 +4,8 @@
 //! - Desktop calls them via `elm327::block_on(obd_ops::foo(...))`
 //! - WASM calls them with `.await`
 
-use crate::adapter::{DiagnosticAdapter, request_hex};
-use crate::app::{ObdEvent, PollConfig, PollMode};
+use crate::adapter::{DiagnosticAdapter, request_hex, request_hex_report};
+use crate::app::{DtcScanResult, ObdEvent, PollConfig, PollMode};
 use crate::elm327::{Elm327Error, ElmAdapter, decode_protocol};
 use crate::obd;
 use std::sync::mpsc;
@@ -145,26 +145,35 @@ async fn require_elm_ok<A: ElmAdapter>(elm: &mut A, command: &str) -> Result<(),
 pub async fn read_dtcs<A: DiagnosticAdapter>(
     elm: &mut A,
     event_tx: &mpsc::Sender<ObdEvent>,
-) -> (Vec<obd::Dtc>, Vec<obd::Dtc>) {
-    let stored = match request_hex(elm, "03", 5000).await {
-        Ok(lines) => obd::parse_dtc_response_lines(&lines, "43"),
+) -> DtcScanResult {
+    let mut warnings = Vec::new();
+    let stored = match request_hex_report(elm, "03", 5000).await {
+        Ok(report) => {
+            warnings.extend(report.warnings);
+            Some(obd::parse_dtc_response_lines(&report.lines, "43"))
+        }
         Err(error) => {
-            let _ = event_tx.send(ObdEvent::Error(format!("Stored DTC read failed: {error}")));
-            return (Vec::new(), Vec::new());
+            warnings.push(format!("Stored DTC read failed: {error}"));
+            None
         }
     };
-    let pending = match request_hex(elm, "07", 5000).await {
-        Ok(lines) => obd::parse_dtc_response_lines(&lines, "47"),
+    let pending = match request_hex_report(elm, "07", 5000).await {
+        Ok(report) => {
+            warnings.extend(report.warnings);
+            Some(obd::parse_dtc_response_lines(&report.lines, "47"))
+        }
         Err(error) => {
-            let _ = event_tx.send(ObdEvent::Error(format!("Pending DTC read failed: {error}")));
-            return (Vec::new(), Vec::new());
+            warnings.push(format!("Pending DTC read failed: {error}"));
+            None
         }
     };
-    let _ = event_tx.send(ObdEvent::DtcResult {
-        stored: stored.clone(),
-        pending: pending.clone(),
-    });
-    (stored, pending)
+    let result = DtcScanResult {
+        stored,
+        pending,
+        warnings,
+    };
+    let _ = event_tx.send(ObdEvent::DtcResult(result.clone()));
+    result
 }
 
 /// Clear all DTCs (Mode 04) then re-read to confirm.
@@ -172,15 +181,20 @@ pub async fn read_dtcs<A: DiagnosticAdapter>(
 pub async fn clear_dtcs<A: DiagnosticAdapter>(
     elm: &mut A,
     event_tx: &mpsc::Sender<ObdEvent>,
-) -> (Vec<obd::Dtc>, Vec<obd::Dtc>) {
+) -> DtcScanResult {
     match request_hex(elm, "04", 5000).await {
         Ok(_) => {
             let _ = event_tx.send(ObdEvent::LogMessage("[DTC_CLEAR] DTCs cleared".into()));
             read_dtcs(elm, event_tx).await
         }
         Err(e) => {
-            let _ = event_tx.send(ObdEvent::Error(format!("Clear DTCs failed: {e}")));
-            (Vec::new(), Vec::new())
+            let result = DtcScanResult {
+                stored: None,
+                pending: None,
+                warnings: vec![format!("Clear DTCs failed: {e}")],
+            };
+            let _ = event_tx.send(ObdEvent::DtcResult(result.clone()));
+            result
         }
     }
 }
@@ -215,6 +229,7 @@ pub async fn poll_live_data<A: DiagnosticAdapter>(
         ],
     };
 
+    let mut responding = false;
     for cmd in cmds {
         let pid_def = match pid_defs.iter().find(|p| p.cmd == *cmd) {
             Some(p) => p,
@@ -223,6 +238,7 @@ pub async fn poll_live_data<A: DiagnosticAdapter>(
         if let Ok(lines) = request_hex(elm, cmd, 2000).await {
             let raw = lines.join("|");
             if let Some(data_bytes) = obd::parse_elm_response(cmd, &lines) {
+                responding = true;
                 let _ = event_tx.send(ObdEvent::LiveData {
                     pid_cmd: cmd.to_string(),
                     name: pid_def.description.to_string(),
@@ -236,6 +252,7 @@ pub async fn poll_live_data<A: DiagnosticAdapter>(
             elm.delay(poll_config.inter_pid_delay_ms).await;
         }
     }
+    let _ = event_tx.send(ObdEvent::LiveDataHealth { responding });
 }
 
 /// Read freeze frame data (Mode 02) for a standard set of PIDs.
@@ -310,20 +327,30 @@ pub async fn query_supported_pids<A: DiagnosticAdapter>(
 ) {
     let mut all_supported = Vec::new();
     for range in SUPPORTED_PID_RANGES {
-        match request_hex(elm, range, 2000).await {
-            Ok(lines) => {
-                let Some(data) = obd::parse_elm_response(range, &lines) else {
-                    break;
-                };
+        match request_hex_report(elm, range, 2000).await {
+            Ok(report) => {
+                for warning in report.warnings {
+                    let _ = event_tx.send(ObdEvent::Error(format!(
+                        "PID discovery incomplete: {warning}"
+                    )));
+                }
                 let base = u8::from_str_radix(&range[2..4], 16).unwrap_or(0);
-                match append_supported_pid_page(base, &data, &mut all_supported) {
-                    Some(true) => {}
-                    Some(false) | None => break,
+                let mut continuation = false;
+                for line in report.lines {
+                    if let Some(data) = obd::parse_elm_response(range, &[line]) {
+                        continuation |= append_supported_pid_page(base, &data, &mut all_supported)
+                            .unwrap_or(false);
+                    }
+                }
+                if !continuation {
+                    break;
                 }
             }
             Err(_) => break,
         }
     }
+    all_supported.sort_unstable();
+    all_supported.dedup();
     let _ = event_tx.send(ObdEvent::SupportedPids(all_supported));
 }
 

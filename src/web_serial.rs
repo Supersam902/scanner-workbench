@@ -438,33 +438,46 @@ pub async fn run_worker(cmd_rx: mpsc::Receiver<OdbCmd>, event_tx: mpsc::Sender<O
                             current_make = make;
                         }
                         if let Some(ref mut e) = elm {
-                            let (stored, pending) = obd_ops::read_dtcs(e, &event_tx).await;
-                            let tx2 = event_tx.clone();
-                            let make2 = current_make.clone();
-                            wasm_bindgen_futures::spawn_local(async move {
-                                let _ = tx2.send(crate::app::ObdEvent::DtcDescriptionsReady {
-                                    stored: obd_ops::enrich_with_db(stored, make2.as_deref()),
-                                    pending: obd_ops::enrich_with_db(pending, make2.as_deref()),
-                                });
+                            let mut result = obd_ops::read_dtcs(e, &event_tx).await;
+                            result.stored = result.stored.map(|codes| {
+                                obd_ops::enrich_with_db(codes, current_make.as_deref())
                             });
+                            result.pending = result.pending.map(|codes| {
+                                obd_ops::enrich_with_db(codes, current_make.as_deref())
+                            });
+                            let _ =
+                                event_tx.send(crate::app::ObdEvent::DtcDescriptionsReady(result));
                         }
                     }
                     OdbCmd::ClearDtcs => {
                         if let Some(ref mut e) = elm {
-                            let (stored, pending) = obd_ops::clear_dtcs(e, &event_tx).await;
-                            let tx2 = event_tx.clone();
-                            let make2 = current_make.clone();
-                            wasm_bindgen_futures::spawn_local(async move {
-                                let _ = tx2.send(crate::app::ObdEvent::DtcDescriptionsReady {
-                                    stored: obd_ops::enrich_with_db(stored, make2.as_deref()),
-                                    pending: obd_ops::enrich_with_db(pending, make2.as_deref()),
-                                });
+                            let mut result = obd_ops::clear_dtcs(e, &event_tx).await;
+                            result.stored = result.stored.map(|codes| {
+                                obd_ops::enrich_with_db(codes, current_make.as_deref())
                             });
+                            result.pending = result.pending.map(|codes| {
+                                obd_ops::enrich_with_db(codes, current_make.as_deref())
+                            });
+                            let _ =
+                                event_tx.send(crate::app::ObdEvent::DtcDescriptionsReady(result));
                         }
                     }
                     OdbCmd::ReadFreezeFrame => {
                         if let Some(ref mut e) = elm {
                             obd_ops::read_freeze_frame(e, &event_tx, &pid_defs).await;
+                        }
+                    }
+                    OdbCmd::Diagnostics(job) => {
+                        live_running = false;
+                        if let Some(ref mut adapter) = elm {
+                            crate::diagnostics::execute(adapter, job, &event_tx).await;
+                        } else {
+                            let _ = event_tx.send(ObdEvent::Diagnostics(
+                                crate::diagnostics::Update::Done(
+                                    job.id,
+                                    "No diagnostic adapter connected".into(),
+                                ),
+                            ));
                         }
                     }
                     OdbCmd::ReadVin => {

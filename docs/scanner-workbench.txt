@@ -1,0 +1,160 @@
+SCANNER WORKBENCH FOR MONGOOSE MFC3
+Windows 32-bit build, November 13, 2026, revision 26
+
+1. Attach the Mongoose to USB and the vehicle. Turn the ignition on.
+2. Open the app from the MFC3 desktop shortcut or the executable in this folder.
+3. Click Connect at the top. The scanner starts with MFC3 drivers and checks
+   other registered Mongoose drivers if needed. It connects after a verified
+   OBD-II reply. You can start without entering a vehicle.
+   After Connect, the VIN field beside DLC voltage shows the VIN received
+   from the vehicle. Hover to highlight it, then click to copy it. The field
+   displays Copied briefly. If the VIN is unavailable, use Read VIN under
+   Vehicle > Information to retry.
+4. On Overview, click Run emissions scan to read readiness since clear
+   and for the current drive cycle, stored, pending and permanent trouble
+   codes, VIN and freeze frame 0. Each check links to its details.
+5. Click Print scan report to open the saved HTML report, then use its
+   Print / Save as PDF button. The report lists stored, pending and
+   permanent codes, the check-engine light and readiness by ECU. It shows
+   each monitor's since-clear and current drive-cycle state side by side.
+   Whether a monitor is actively running is unknown.
+   A verified freeze frame is linked to its trigger code from the same ECU.
+   The report includes the captured values and flags empty, missing and
+   unverified results. The printout groups findings into sections and uses
+   a single scan date. Use Print session report for readings taken separately.
+6. Under Saved work, open Scan history to find a completed or interrupted
+   emissions scan by date, vehicle, VIN or plate. Select it to review the
+   checks and print the readings captured during that scan.
+7. To compare results, select the later scan and choose an earlier scan for
+   the same VIN or plate under Before / after. The comparison shows code
+   changes by ECU and category, the check-engine light, and readiness for
+   both periods. A missing or incomplete reply is marked unverified.
+   Print comparison opens a printable copy.
+
+DLC voltage
+One readout at the top shows voltage at the vehicle's diagnostic connector.
+The Mongoose reads it about every two seconds, including between diagnostic
+requests. Before Connect and during practice, it can sample the connector
+through a cable with no diagnostic session open. Hover over the voltage to
+see which driver supplied it. A dash means a current sample is unavailable.
+
+Connection details
+Automatic Connect tries the last verified protocol for the matching driver
+first, even after an app restart. It looks for a fresh supported-PID reply
+and continues the automatic search if the saved protocol fails. The normal
+search order is 11-bit and 29-bit CAN at 500 and 250 kbit/s, KWP2000 fast
+init, ISO 9141-2 5-baud init, KWP2000 5-baud init and SAE J1850 VPW and PWM.
+The scanner allows the K-line to settle between attempts. The 29-bit CAN
+search sets an ISO-TP filter for each ECU that answers the emissions
+broadcast. The status line shows the
+current attempt or wait. Connection lists each driver and protocol tried
+in the latest connection check, including failures opening or setting up a
+channel, failures sending a request and requests with no verified ECU reply.
+Copy results copies the outcomes and the driver's error text.
+Use Protocol override there to limit Connect to a single protocol. A known
+29-bit ECU source limits Connect to 29-bit CAN. Overrides last until the
+app closes.
+
+The installed Mongoose 04.04 driver must match the 32-bit app. The scanner
+runs it in a separate process. If the driver loses the diagnostic channel or
+stops responding, click Connect to start a fresh session. If an emissions
+clear was interrupted, read the codes and readiness again to see what the
+vehicle applied.
+
+The Connection page shows the age of the last vehicle reply. Two missed
+requests for known live PIDs can show No vehicle reply while the cable
+stays connected. Check vehicle reply sends one supported-PID request and
+updates that indicator. The next ECU reply restores the Connected status.
+
+Using results
+This build uses generic emissions OBD-II. Available codes, PIDs, freeze frames,
+monitor tests and VIN replies depend on the vehicle. Pending, malformed and
+unfinished multi-frame replies appear alongside completed ECU results.
+The emissions scan summary shows replies and read issues from that run.
+If the scan stops early, the summary identifies checks with no result.
+The scanner saves the readings and vehicle details as they were at the end
+of each run, including practice scans labeled as such. Recordings also
+retain scan summaries for replay. A history save failure appears under
+Scan history. If the scanner cannot save the scan before closing, it opens
+Scan history so you can retry. If the history folder is still unavailable,
+enter a writable folder under Save scans to folder to recover the JSON files.
+Under Vehicle, open Information and click Read vehicle information.
+The scanner checks which Mode 09 fields the ECUs advertise, then shows
+VINs, calibration IDs, verification numbers and supported identifiers
+by ECU. Open In-use performance to see monitor completions and the
+number of times their conditions were met. A shortened reply is flagged.
+If ECUs report different VINs, the scanner shows both replies and clears
+the VIN it applied to the session.
+
+Live Data polls in the background while the toolbar stays available. A
+separate diagnostic read stops polling and waits for the current request to
+finish. Live Data uses the support reply from Connect and checks additional ranges
+the vehicle announces between diagnostic jobs. The default filter skips PIDs
+omitted from checked ranges. Unchecked ranges stay available. Use Refresh PID
+support to check again or turn off Skip unreported PIDs to select all items.
+Live Data can group up to six reported PIDs with known response sizes in one
+CAN request. If an expected ECU reply is incomplete, the scanner retries the
+affected PIDs individually and uses individual requests until reconnect.
+Turn off Group CAN reads under Data items to use individual requests from
+the start.
+The readings and graphs identify the responding ECU. If one signal is
+unavailable, other signals from the same reply can still update. Live Data
+opens with the table visible. Turn on Graphs and use Signals to choose up to
+six readings by ECU. Choose a time window from 10 to 120 seconds. Hover
+over a point to see its value and age. Gaps show failed reads and pauses.
+Playback controls are also available on Live Data when a recording is open.
+
+In Emissions, choose Freeze frame, select a frame number and click Read
+freeze frame. The scan reads the trigger code and discovers the PIDs reported
+for that frame. Results show the trigger and captured values by ECU. Values
+from before the latest trigger read are labeled. An ECU that previously
+answered for this frame and now misses the trigger read is marked unverified.
+Undecoded PIDs are shown as raw bytes. An ECU that reports no stored freeze
+frame is identified in the results.
+
+In Emissions, choose Monitor tests and click Read supported monitors.
+The scanner requests results for the IDs the ECUs report. A missing ECU
+reply flags its previous results as unverified. You can enter a known
+hex ID directly if an older ECU supplies no support bitmap. CAN tests
+show Pass, Fail, or Not completed when the result can be interpreted.
+On a K-line or J1850 connection, Read oxygen tests finds sensor locations and reads
+the stored Mode 05 tests. The table shows bank and sensor where the vehicle
+reports a location, plus measured values and limits. The scanner checks
+oxygen-sensor readiness before assigning Pass or Fail. If an older ECU
+supplies no test list, select a sensor mask and enter a known test ID.
+Manufacturer-specific scaling and legacy Mode 06 results stay raw.
+
+Readiness lists monitors by ECU. Since clear shows the check-engine light
+and confirmed DTC count alongside monitor status. This drive cycle shows
+which monitors have completed in the current cycle and which are disabled.
+Show unsupported reveals monitors that the ECU reports it does not support.
+An ECU's since-clear reply helps identify disabled drive-cycle monitors.
+Results from before an emissions clear or after a failed refresh are labeled.
+The drive-cycle report distinguishes incomplete and disabled monitors.
+It cannot tell when a monitor is actively running.
+
+Trouble Codes shows results and read issues by ECU. Use Stored, Pending, or
+Permanent to filter the table. A missing reply keeps the ECU's previous
+list visible as unverified. Click a link in the Freeze frame column to open
+the matching frame and ECU. The links also work during recording replay.
+On a legacy connection, the scanner also reads
+the ECU's confirmed-code count. A fresh zero count can confirm an empty
+stored-code list when that ECU sends no list.
+
+Trouble Codes lists each ECU that acknowledges a clear request.
+Affected readings from before the request stay marked as historical until you
+reread them. Click Recheck codes and readiness for a follow-up scan.
+
+Garage details apply to the current session. Saved comparisons need a VIN or
+plate/fleet ID. Scan history, recordings, settings, reports and the diagnostic log are stored
+in %LOCALAPPDATA%\ScannerWorkbench.
+In Saved work, select a recording to see its date, duration and read issues.
+Open recording file lets you browse for a recording stored elsewhere. The
+preview is available during a scan. Replay opens the recording offline.
+Export full CSV saves the entire recording to the exports folder, with
+timestamps, ECU IDs, values, units, read issues and raw replies.
+The log includes code scan results, readiness summaries and freeze-frame
+trigger replies. Use recordings to keep full live data.
+
+Use Start practice on Overview to explore simulated diagnostic data.
+Application source is MIT. Generic OBDb data is CC BY-SA 4.0 with attribution.

@@ -5,11 +5,38 @@
 
 use crate::elm327::{ConnectionInfo, Elm327Error, ElmAdapter};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiagnosticResponse {
-    /// CAN identifier when the backend supplies one.
+    /// ECU address when the backend supplies one.
     pub source: Option<u32>,
     pub payload: Vec<u8>,
+    /// Receive failures have no complete payload to decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_error: Option<String>,
+}
+
+impl DiagnosticResponse {
+    pub fn new(source: Option<u32>, payload: Vec<u8>) -> Self {
+        Self {
+            source,
+            payload,
+            transport_error: None,
+        }
+    }
+
+    pub(crate) fn receive_failure(source: Option<u32>, message: String) -> Self {
+        Self {
+            source,
+            payload: Vec::new(),
+            transport_error: Some(message),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DiagnosticTarget {
+    pub request: u32,
+    pub response: u32,
 }
 
 #[allow(async_fn_in_trait)]
@@ -19,6 +46,16 @@ pub trait DiagnosticAdapter {
         payload: &[u8],
         timeout_ms: u64,
     ) -> Result<Vec<DiagnosticResponse>, Elm327Error>;
+    async fn request_to(
+        &mut self,
+        _target: DiagnosticTarget,
+        _payload: &[u8],
+        _timeout_ms: u64,
+    ) -> Result<Vec<DiagnosticResponse>, Elm327Error> {
+        Err(Elm327Error::ProtocolError(
+            "ECU-addressed requests require the native J2534 connection".into(),
+        ))
+    }
     fn connection_info(&self) -> &ConnectionInfo;
     async fn voltage(&mut self) -> Result<String, Elm327Error>;
     async fn delay(&mut self, ms: u64);
@@ -126,20 +163,17 @@ fn decode_elm_payloads(lines: &[String]) -> Result<Vec<DiagnosticResponse>, Elm3
             let length = expected_length.unwrap();
             if assembled.len() >= length {
                 assembled.truncate(length);
-                responses.push(DiagnosticResponse {
-                    source: None,
-                    payload: std::mem::take(&mut assembled),
-                });
+                responses.push(DiagnosticResponse::new(
+                    None,
+                    std::mem::take(&mut assembled),
+                ));
                 expected_length = None;
             }
         } else {
             if expected_length.is_some() {
                 return Err(Elm327Error::ProtocolError("Incomplete ELM message".into()));
             }
-            responses.push(DiagnosticResponse {
-                source: None,
-                payload: decode_hex(&text)?,
-            });
+            responses.push(DiagnosticResponse::new(None, decode_hex(&text)?));
         }
     }
     if expected_length.is_some() || responses.is_empty() {
@@ -150,22 +184,41 @@ fn decode_elm_payloads(lines: &[String]) -> Result<Vec<DiagnosticResponse>, Elm3
     Ok(responses)
 }
 
-/// Compatibility boundary for the existing standard OBD decoders.
-pub async fn request_hex<A: DiagnosticAdapter>(
+/// Positive responses and any rejected responders from a functional request.
+pub struct DiagnosticRead {
+    pub lines: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+pub async fn request_hex_report<A: DiagnosticAdapter>(
     adapter: &mut A,
     command: &str,
     timeout_ms: u64,
-) -> Result<Vec<String>, Elm327Error> {
+) -> Result<DiagnosticRead, Elm327Error> {
     let request = decode_hex(command)?;
     let replies = adapter.request(&request, timeout_ms).await?;
     let mut lines = Vec::new();
+    let mut warnings = Vec::new();
     for reply in replies {
-        if reply.payload.starts_with(&[0x7F, request[0]]) {
-            return Err(Elm327Error::ProtocolError(format!(
+        if let Some(error) = &reply.transport_error {
+            let source = reply
+                .source
+                .map_or_else(|| "unidentified source".into(), |id| format!("ECU {id:X}"));
+            warnings.push(format!("Diagnostic request {command} to {source}: {error}"));
+            continue;
+        } else if reply.payload == [0x7F, request[0], 0x78] {
+            warnings.push(format!(
+                "Diagnostic request {command} remained pending at ECU {:?}",
+                reply.source
+            ));
+            continue;
+        } else if reply.payload.starts_with(&[0x7F, request[0]]) {
+            warnings.push(format!(
                 "Diagnostic request {command} rejected by {:?}: {}",
                 reply.source,
                 encode_hex(&reply.payload)
-            )));
+            ));
+            continue;
         }
         if reply.payload.first() != Some(&request[0].wrapping_add(0x40)) {
             continue;
@@ -175,12 +228,31 @@ pub async fn request_hex<A: DiagnosticAdapter>(
         }
         lines.push(encode_hex(&reply.payload));
     }
+    // Only known read services may return partial results. A rejected clear
+    // (or any other state-changing service) must still fail explicitly.
+    let read_only = matches!(request[0], 0x01 | 0x02 | 0x03 | 0x07 | 0x09 | 0x0A);
+    if !warnings.is_empty() && (!read_only || lines.is_empty()) {
+        return Err(Elm327Error::ProtocolError(warnings.join("; ")));
+    }
     if lines.is_empty() {
         return Err(Elm327Error::ProtocolError(format!(
             "No matching response to {command}"
         )));
     }
-    Ok(lines)
+    Ok(DiagnosticRead { lines, warnings })
+}
+
+/// Compatibility boundary for callers that only need the positive payloads.
+pub async fn request_hex<A: DiagnosticAdapter>(
+    adapter: &mut A,
+    command: &str,
+    timeout_ms: u64,
+) -> Result<Vec<String>, Elm327Error> {
+    let report = request_hex_report(adapter, command, timeout_ms).await?;
+    for warning in &report.warnings {
+        tracing::warn!(%warning, "Partial diagnostic response");
+    }
+    Ok(report.lines)
 }
 
 #[cfg(test)]

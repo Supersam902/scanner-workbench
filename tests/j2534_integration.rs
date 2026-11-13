@@ -45,7 +45,10 @@ fn native_driver_connects_reads_faults_and_vin_and_cleans_up_errors() {
             .get::<unsafe extern "C" fn() -> u32>(b"MockDisconnects\0")
             .unwrap()
     };
-    for protocol in CanProtocol::ALL {
+    for protocol in CanProtocol::ALL
+        .into_iter()
+        .filter(|protocol| protocol.is_can())
+    {
         let mut adapter = J2534::connect(&driver, protocol).unwrap();
         assert_eq!(block_on(adapter.voltage()).unwrap(), "12.6V");
         let replies = block_on(adapter.request(&[1, 0], 1000)).unwrap();
@@ -59,7 +62,9 @@ fn native_driver_connects_reads_faults_and_vin_and_cleans_up_errors() {
         let (tx, rx) = std::sync::mpsc::channel();
         block_on(obd_dashboard::obd_ops::read_vin(&mut adapter, &tx));
         assert!(matches!(rx.recv().unwrap(), ObdEvent::Vin(vin) if vin == "WF0A1234567890123"));
-        let (stored, pending) = block_on(obd_dashboard::obd_ops::read_dtcs(&mut adapter, &tx));
+        let scan = block_on(obd_dashboard::obd_ops::read_dtcs(&mut adapter, &tx));
+        let stored = scan.stored.unwrap();
+        let pending = scan.pending.unwrap();
         assert_eq!(
             stored
                 .iter()
@@ -68,7 +73,7 @@ fn native_driver_connects_reads_faults_and_vin_and_cleans_up_errors() {
             ["P0133", "U0100"]
         );
         assert!(pending.is_empty());
-        assert!(matches!(rx.recv().unwrap(), ObdEvent::DtcResult { .. }));
+        assert!(matches!(rx.recv().unwrap(), ObdEvent::DtcResult(_)));
 
         unsafe {
             scenario(2);
@@ -84,7 +89,7 @@ fn native_driver_connects_reads_faults_and_vin_and_cleans_up_errors() {
         assert!(block_on(request_hex(&mut adapter, "04", 1000)).is_err());
         block_on(obd_dashboard::obd_ops::clear_dtcs(&mut adapter, &tx));
         assert!(
-            matches!(rx.recv().unwrap(), ObdEvent::Error(_)),
+            matches!(rx.recv().unwrap(), ObdEvent::DtcResult(scan) if scan.stored.is_none() && !scan.warnings.is_empty()),
             "a rejected clear must never be reported as success"
         );
         unsafe {

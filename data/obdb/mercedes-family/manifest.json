@@ -1,0 +1,268 @@
+{
+  "retrieved": "2026-10-23",
+  "license": "CC-BY-SA-4.0",
+  "requested_year_range": "2005-current; selection range is not proof of compatibility",
+  "profiles": [
+    {
+      "name": "Mercedes-Benz-A-180",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-A-180/main/signalsets/v3/default.json",
+      "commands": 14,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-A-200",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-A-200/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-A-220",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-A-220/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-AMG-A-45",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-AMG-A-45/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-AMG-GT",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-AMG-GT/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-B-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-B-Class/main/signalsets/v3/default.json",
+      "commands": 12,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-C-180",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-C-180/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-C-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-C-Class/main/signalsets/v3/default.json",
+      "commands": 14,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-C200d",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-C200d/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-CL-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-CL-Class/main/signalsets/v3/default.json",
+      "commands": 12,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-CLA-200",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-CLA-200/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-CLA-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-CLA-Class/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-CLK-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-CLK-Class/main/signalsets/v3/default.json",
+      "commands": 14,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-CLS",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-CLS/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-E-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-E-Class/main/signalsets/v3/default.json",
+      "commands": 19,
+      "ecu": [
+        {
+          "hdr": "7E0",
+          "type": "engine"
+        },
+        {
+          "hdr": "7E1",
+          "type": "transmission"
+        }
+      ]
+    },
+    {
+      "name": "Mercedes-Benz-E180",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-E180/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-EQA",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-EQA/main/signalsets/v3/default.json",
+      "commands": 11,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-EQB",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-EQB/main/signalsets/v3/default.json",
+      "commands": 37,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-EQE",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-EQE/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-EQS",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-EQS/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-EQS-Class-Sedan",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-EQS-Class-Sedan/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-EQV",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-EQV/main/signalsets/v3/default.json",
+      "commands": 20,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-G-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-G-Class/main/signalsets/v3/default.json",
+      "commands": 2,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-GLA-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-GLA-Class/main/signalsets/v3/default.json",
+      "commands": 12,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-GLA250",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-GLA250/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-GLB-250",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-GLB-250/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-GLC-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-GLC-Class/main/signalsets/v3/default.json",
+      "commands": 14,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-GLK-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-GLK-Class/main/signalsets/v3/default.json",
+      "commands": 12,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-M-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-M-Class/main/signalsets/v3/default.json",
+      "commands": 12,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-ML-350",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-ML-350/main/signalsets/v3/default.json",
+      "commands": 12,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-Ml63",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-Ml63/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-S-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-S-Class/main/signalsets/v3/default.json",
+      "commands": 0,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-SL-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-SL-Class/main/signalsets/v3/default.json",
+      "commands": 12,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-SLC-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-SLC-Class/main/signalsets/v3/default.json",
+      "commands": 12,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-SLK-Class",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-SLK-Class/main/signalsets/v3/default.json",
+      "commands": 12,
+      "ecu": []
+    },
+    {
+      "name": "Mercedes-Benz-Viano",
+      "branch": "main",
+      "url": "https://raw.githubusercontent.com/OBDb/Mercedes-Benz-Viano/main/signalsets/v3/default.json",
+      "commands": 12,
+      "ecu": []
+    }
+  ]
+}

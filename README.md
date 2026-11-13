@@ -1,9 +1,25 @@
 # OBD Dashboard
 
+## Scanner Workbench rebuild (Windows / Mongoose MFC3)
+
+Open the `scanner-workstation` binary and click **Connect**. It looks up installed Mongoose J2534 04.04 drivers, tries the MFC3 first and checks the cable for a generic OBD-II response. The top bar refreshes voltage from the diagnostic connector about every two seconds and reads the VIN after connection. Hover over the VIN to highlight it and click to copy it. See [the Scanner Workbench guide](docs/scanner-workbench.txt).
+
+Build with `cargo build --locked --release --target i686-pc-windows-gnu --bin scanner-workstation`. Run the complete native suite with `cargo test --locked --release --target i686-pc-windows-gnu --all-targets`; native fixture tests need the target C compiler. The existing classic executable remains available as `obd-dashboard`.
+
+Get the Windows x86 installer and portable ZIP from [Scanner Workbench releases](https://github.com/Supersam902/scanner-workbench/releases). See the [release guide](docs/scanner-releases.md) for build and updater details.
+
+Workbench settings and evidence live in `%LOCALAPPDATA%/ScannerWorkbench`. `--data-dir PATH` selects an alternative storage folder, and `--demo` starts the local practice simulator. Workbench sends generic emissions OBD-II requests. Garage details label results and reports. Use a VIN or plate/fleet ID to compare a saved baseline.
+
+The rebuild also fixes [OBDb null-limit semantics](https://github.com/OBDb/.schemas/blob/main/signals.json): `nullmin` and `nullmax` apply to scaled lower and upper invalid bounds. Normal speed/fuel readings no longer become unavailable. Byte-aligned little-endian signal formats are supported; ambiguous formats and profiles requiring unsupported diagnostic sessions/routing remain explicit exclusions. Physical vehicle verification is still required; simulator/native ABI checks do not establish full Toyota or Mercedes coverage.
+
 A real-time OBD-II diagnostic dashboard for ELM-compatible and J2534 adapters, built in Rust with [egui](https://github.com/emilk/egui). Runs as a native desktop app and as a web app (WASM) accessible from any browser.
 
 ## Features
 
+- **Generic OBD-II workspace** - Services 01 through 0A, 205 bundled SAE PID commands, ECU support discovery, per-ECU results, readiness, freeze-frame selection, permanent DTCs, vehicle information and monitor results. Select reads to repeat, plot recent values and record CSV. Undecoded results retain raw bytes. Modes 04 and 08 require explicit confirmation.
+- **Toyota / Lexus scan-tool workspace** - Vehicle selection, system cards, Data List, Trouble Codes and coverage information. A bundled library of 75 model profiles includes 61 sources with definitions. No vehicle is preselected. Enhanced reads use model-year filtering and supported transport settings; missing coverage remains explicit. Read once, start/stop live data, view graphs and record CSV. ECU addresses and raw bytes live in Details.
+- **Mercedes-Benz alongside Toyota/Lexus** - The Vehicle Diagnostics workspace accepts Mercedes model years 2005 through the current year and bundles 36 model sources, 19 with community definitions. Most Mercedes definitions are experimental and remain off by default. Model/year selection is not a compatibility guarantee. Supported CAN ECUs can attempt read-only UDS `19 02 FF` fault-code reads with raw 24-bit identifiers and status flags; OEM fault descriptions and fault-memory clearing are unavailable. Complete positive reads replace the previous ECU list; failed or malformed reads retain previous codes and their age.
+- **Older Toyota connections** - J2534 ISO 9141-2, KWP2000 fast initialization and KWP2000 5-baud initialization, with driver-managed keepalives. Select the correct protocol explicitly. K-line enhanced definitions need matching one-byte ECU addresses and ECU-specific validation.
 - **Auto-detection** - Automatically finds your ELM327 adapter (USB, Bluetooth, serial) and negotiates baud rate and OBD protocol
 - **Live gauges** - Radial gauges for RPM, speed, coolant temp, oil temp, throttle, engine load with color-coded warning/danger thresholds
 - **90 Mode 01 PID definitions** - Temperatures, pressures, fuel trims, O2 voltage/current, torque, pedal, evaporative-system data, odometer, and more; the ECU's support bitmap determines which readings are available
@@ -28,7 +44,7 @@ A real-time OBD-II diagnostic dashboard for ELM-compatible and J2534 adapters, b
 | Corsa D MS-CAN ELM profile | Yes, experimental | No | Standard OBD requests over User Protocol B; no body-module scan |
 | ELM-compatible Bluetooth serial | OS serial port required | Depends on browser/OS exposure | Same ELM diagnostic path |
 | ELM-compatible Wi-Fi / TCP | Yes, explicit host and port | Not directly | Same ELM diagnostic path |
-| J2534 04.04 vendor driver | Yes, matching native library required | Not directly | Standard ISO 15765 CAN at 250/500 kbit/s |
+| J2534 04.04 vendor driver | Yes, matching native library required | Not directly | ISO 15765 CAN, ISO 9141-2, ISO 14230 KWP2000 and SAE J1850 VPW/PWM |
 | Legacy PSA VCI / Lexia / DiagBox-specific library | Not implemented | No | Requires a separate backend unless the device supplies a compatible J2534 driver |
 
 The desktop connection selector is available above the dashboard and on the disconnected screen.
@@ -47,7 +63,7 @@ adapter's MS position yourself; the app cannot switch the adapter's physical pin
 
 1. Install the interface manufacturer's J2534 **04.04** driver.
 2. Select **J2534 pass-through**, then choose an installed driver or enter its absolute library path.
-3. Select the vehicle's CAN identifier format and rate. This backend does not automatically search protocols.
+3. Select the vehicle's CAN format and rate, ISO 9141-2, KWP2000 or J1850 protocol. Scanner Workbench provides automatic protocol search.
 4. For 29-bit CAN, set the ECU source address in hexadecimal. The default is `10`; check the vehicle
    documentation. This connects to one selected ECU. The 11-bit connection accepts the standard
    OBD response IDs `7E8` through `7EF`.
@@ -61,13 +77,25 @@ Only load a trusted manufacturer library: loading a native library executes its 
 The backend performs ISO-TP through the vendor driver, sets flow-control filters, retains response CAN IDs,
 ignores transmit/start indications and waits for pending ECU responses within the request deadline.
 The existing gauges, VIN, stored/pending DTCs and freeze-frame operations use this shared diagnostic path.
-The current screens still present standard OBD data rather than an inventory of individual modules.
+The Vehicle Diagnostics tab can address explicitly defined modules. It does not perform an automatic all-module scan.
+
+### Expanded diagnostics
+
+In **Generic OBD-II**, discover support for the selected service, select commands and choose **Read / run selected**. Mode 02 uses the chosen freeze-frame number. Modes 03/07/0A read stored/pending/permanent codes respectively. Mode 09 exposes identity, calibration and performance-counter data. Mode 06 decodes CAN records with known unit/scaling identifiers; unknown scaling and legacy formats remain raw. Mode 05 uses documented test/sensor bytes through the manual request field. Mode 08 accepts the ECU's documented test parameters and is never repeated automatically. Discovery itself sends only support queries.
+
+The **Vehicle Diagnostics** workspace opens with Toyota, Lexus and Mercedes-Benz vehicle selection. Choose make, model and model year, continue to Systems, then select Data List. System cards describe the loaded profile and are labeled "Not scanned"; this release has no automatic health scan. Names come from ECU metadata where present or describe the signals in the group. Use Select data items to choose request groups, then Read once or Start live. Details exposes request/response identifiers and raw replies without special arrow glyphs. Changing vehicle/system cancels pending reads and clears previous readings.
+
+Trouble Codes in OBD-II Engine provides generic engine emissions codes only. Enhanced Toyota DTC services and OEM utilities are explicitly unavailable. Experimental definitions are optional; extended addressing, custom flow-control/initialization settings and incomplete ECU address definitions are excluded. Empty profiles do not become supported vehicles. Imports use the same restrictions. For older K-line enhanced reads, use a matching profile with one-byte ECU addresses or the advanced read request field; CAN identifiers are not automatically translated.
+
+Definitions and original capture fixtures are in `data/obdb`, under CC BY-SA 4.0 with attribution. Application code retains the repository license. Toyota functions currently cover enhanced data reads, not OEM programming, immobilizer work, adaptations, enhanced fault-code services or an equivalent of Techstream.
+
+For Mercedes, start with the actual model and year, then inspect Coverage / Info. An empty or filtered profile offers generic OBD-II only. Experimental reads are optional; unsupported transport definitions remain excluded even when enabled. Unlisted models can use the generic Mercedes option. The selected profile does not change adapter protocols or pins. Mercedes UDS fault reads are offered only for explicit profile ECU targets on CAN; older KWP-specific fault services are unavailable. CAN/K-line support does not provide DoIP: [Mercedes documents pure DoIP vehicles starting with series 206 and 223](https://b2bconnect.mercedes-benz.com/ie/help/faq/software/xentry-pass-thru-eu). This app cannot connect to their DoIP-only systems. The initial `0100` handshake also requires an emissions OBD responder, so some EVs may not connect. No physical Mercedes validation has been performed. This build does not supply Xentry coverage, SCN coding, security access, adaptations or programming.
 
 ### Coverage limits
 
 Connection support does **not** establish compatibility with every vehicle or module. Manufacturer fault-code
-JSON files provide descriptions, not module access. Manufacturer-specific module discovery, manual/automatic
-bus switching, custom pin routing, legacy J2534 protocols, CAN FD, DoIP and security-gateway authentication
+JSON fault-code files provide descriptions, not module access. Manufacturer-specific module discovery, manual/automatic
+bus switching, custom pin routing, CAN FD, DoIP and security-gateway authentication
 are not implemented by the new J2534 backend. A capable interface does not add those application features.
 The existing corporate-family description fallback also remains; it is not a verified ECU-specific definition.
 

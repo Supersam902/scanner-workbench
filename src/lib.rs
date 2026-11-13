@@ -1,5 +1,8 @@
 pub mod adapter;
 pub mod app;
+pub mod diagnostics;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod scanner;
 pub mod dtc_database;
 pub mod dtc_descriptions;
 pub mod elm327;

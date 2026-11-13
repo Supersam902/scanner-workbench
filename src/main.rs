@@ -1,5 +1,6 @@
 mod adapter;
 mod app;
+mod diagnostics;
 mod dtc_database;
 mod dtc_descriptions;
 mod elm327;
@@ -100,14 +101,14 @@ fn main() {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 750.0])
             .with_min_inner_size([800.0, 500.0])
-            .with_title("OBD-II Dashboard"),
+            .with_title("Vehicle Diagnostic Workstation - MFC3"),
         ..Default::default()
     };
 
     let cmd_tx_clone = cmd_tx.clone();
     let log_file_clone = log_file.clone();
     eframe::run_native(
-        "OBD-II Dashboard",
+        "Vehicle Diagnostic Workstation - MFC3",
         native_options,
         Box::new(move |cc| {
             Ok(Box::new(ObdApp::new(
@@ -246,6 +247,19 @@ fn enqueue_telemetry_frame(
 
 #[cfg(not(target_arch = "wasm32"))]
 impl adapter::DiagnosticAdapter for AnyAdapter {
+    async fn request_to(
+        &mut self,
+        target: adapter::DiagnosticTarget,
+        payload: &[u8],
+        timeout_ms: u64,
+    ) -> Result<Vec<adapter::DiagnosticResponse>, elm327::Elm327Error> {
+        match self {
+            Self::J2534(e) => e.request_to(target, payload, timeout_ms).await,
+            _ => Err(elm327::Elm327Error::ProtocolError(
+                "ECU-addressed requests currently require J2534".into(),
+            )),
+        }
+    }
     async fn request(
         &mut self,
         payload: &[u8],
@@ -458,38 +472,44 @@ fn obd_worker(
                         current_make = make;
                     }
                     if let Some(ref mut e) = elm {
-                        let (stored, pending) = elm327::block_on(obd_ops::read_dtcs(e, &event_tx));
-                        let tx2 = event_tx.clone();
-                        let make2 = current_make.clone();
-                        let db2 = dtc_db.clone();
-                        thread::spawn(move || {
-                            let _ = tx2.send(ObdEvent::DtcDescriptionsReady {
-                                stored: enrich_dtcs(stored, make2.as_deref(), &db2),
-                                pending: enrich_dtcs(pending, make2.as_deref(), &db2),
-                            });
-                        });
+                        let result = elm327::block_on(obd_ops::read_dtcs(e, &event_tx));
+                        publish_dtc_descriptions(
+                            result,
+                            current_make.as_deref(),
+                            &dtc_db,
+                            &event_tx,
+                        );
                     }
                 }
 
                 OdbCmd::ClearDtcs => {
                     if let Some(ref mut e) = elm {
                         info!("[DTC_CLEAR] Clearing DTCs");
-                        let (stored, pending) = elm327::block_on(obd_ops::clear_dtcs(e, &event_tx));
-                        let tx2 = event_tx.clone();
-                        let make2 = current_make.clone();
-                        let db2 = dtc_db.clone();
-                        thread::spawn(move || {
-                            let _ = tx2.send(ObdEvent::DtcDescriptionsReady {
-                                stored: enrich_dtcs(stored, make2.as_deref(), &db2),
-                                pending: enrich_dtcs(pending, make2.as_deref(), &db2),
-                            });
-                        });
+                        let result = elm327::block_on(obd_ops::clear_dtcs(e, &event_tx));
+                        publish_dtc_descriptions(
+                            result,
+                            current_make.as_deref(),
+                            &dtc_db,
+                            &event_tx,
+                        );
                     }
                 }
 
                 OdbCmd::ReadFreezeFrame => {
                     if let Some(ref mut e) = elm {
                         elm327::block_on(obd_ops::read_freeze_frame(e, &event_tx, &pid_defs));
+                    }
+                }
+
+                OdbCmd::Diagnostics(job) => {
+                    live_running = false;
+                    if let Some(ref mut adapter) = elm {
+                        elm327::block_on(diagnostics::execute(adapter, job, &event_tx));
+                    } else {
+                        let _ = event_tx.send(ObdEvent::Diagnostics(diagnostics::Update::Done(
+                            job.id,
+                            "No diagnostic adapter connected".into(),
+                        )));
                     }
                 }
 
@@ -711,6 +731,22 @@ mod freematics_reconnect_tests {
         assert!(retry.port.is_none());
         assert!(retry.info.is_none());
         assert!(retry.valid_frame().is_none());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn publish_dtc_descriptions(
+    mut result: app::DtcScanResult,
+    make: Option<&str>,
+    db: &DtcDatabase,
+    tx: &mpsc::Sender<ObdEvent>,
+) {
+    // The database is already in memory. Keep enrichment ordered with worker
+    // commands so an old scan cannot overwrite a later scan or connection.
+    result.stored = result.stored.map(|codes| enrich_dtcs(codes, make, db));
+    result.pending = result.pending.map(|codes| enrich_dtcs(codes, make, db));
+    if result.stored.is_some() || result.pending.is_some() {
+        let _ = tx.send(ObdEvent::DtcDescriptionsReady(result));
     }
 }
 

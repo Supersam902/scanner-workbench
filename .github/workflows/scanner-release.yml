@@ -1,0 +1,196 @@
+name: Scanner Workbench Windows x86
+
+on:
+  workflow_dispatch:
+    inputs:
+      verify_upgrade:
+        description: Run an isolated Windows upgrade test
+        type: boolean
+        default: false
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags:
+      - "workbench-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scanner-workbench-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.99.1-x86_64-pc-windows-gnu
+  SCANNER_TARGET: i686-pc-windows-gnu
+  SCANNER_WORKBENCH_UPDATE_REPOSITORY: ${{ vars.SCANNER_WORKBENCH_UPDATE_REPOSITORY || (github.repository == 'Supersam902/scanner-workbench' && github.repository) || '' }}
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select the Workbench version
+        shell: pwsh
+        run: |
+          $version = 'development'
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+              if ($env:GITHUB_REF_NAME -cnotmatch '^workbench-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$') {
+                  throw 'Use workbench-vMAJOR.MINOR.PATCH for a Workbench release tag.'
+              }
+              $version = $Matches[1]
+          }
+          "SCANNER_WORKBENCH_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --target $env:SCANNER_TARGET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sysroot = rustup run $env:RUST_TOOLCHAIN rustc --print sysroot
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hostLinker = Join-Path $sysroot 'lib/rustlib/x86_64-pc-windows-gnu/bin/self-contained/x86_64-w64-mingw32-gcc.exe'
+          if (!(Test-Path -LiteralPath $hostLinker)) {
+              throw 'The host GNU linker was missing from the Rust toolchain.'
+          }
+          "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$hostLinker" >> $env:GITHUB_ENV
+
+      - name: Install LLVM-MinGW
+        shell: pwsh
+        run: |
+          $name = 'llvm-mingw-20261020-ucrt-x86_64'
+          $archive = Join-Path $env:RUNNER_TEMP "$name.zip"
+          Invoke-WebRequest -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/$name.zip" -OutFile $archive -TimeoutSec 180
+          $expected = 'fd5462b7f5d93b2ff981fcd3f9c7e427e47f3203c64ea91c27bcc444eebd74cd'
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expected) {
+              throw 'LLVM-MinGW archive digest did not match the pinned release.'
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP
+          $bin = Join-Path $env:RUNNER_TEMP "$name/bin"
+          $linker = Join-Path $bin 'i686-w64-mingw32-gcc.exe'
+          $ar = Join-Path $bin 'i686-w64-mingw32-ar.exe'
+          if (!(Test-Path -LiteralPath $linker) -or !(Test-Path -LiteralPath $ar)) {
+              throw 'The x86 C compiler or archiver is missing.'
+          }
+          $bin >> $env:GITHUB_PATH
+          "CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER=$linker" >> $env:GITHUB_ENV
+          "CC_i686_pc_windows_gnu=$linker" >> $env:GITHUB_ENV
+          "AR_i686_pc_windows_gnu=$ar" >> $env:GITHUB_ENV
+
+      - name: Test the Windows x86 build
+        shell: pwsh
+        run: rustup run $env:RUST_TOOLCHAIN cargo test --locked --target $env:SCANNER_TARGET --all-targets -- --test-threads=1
+
+      - name: Build and package the scanner
+        shell: pwsh
+        run: |
+          rustup run $env:RUST_TOOLCHAIN cargo build --locked --release --target $env:SCANNER_TARGET --bin scanner-workstation
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/package-scanner.ps1 -Binary "target/$env:SCANNER_TARGET/release/scanner-workstation.exe" -OutputDirectory dist -ExpectedVersion $env:SCANNER_WORKBENCH_VERSION
+
+      - name: Install the Windows packaging tool
+        if: (github.ref_type == 'tag' && env.SCANNER_WORKBENCH_UPDATE_REPOSITORY == github.repository) || inputs.verify_upgrade
+        shell: pwsh
+        run: |
+          $version = '1.2.161'
+          $name = "vpk.$version.nupkg"
+          $packages = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'velopack-packages')
+          $package = Join-Path $packages.FullName $name
+          Invoke-WebRequest -Uri "https://github.com/velopack/velopack/releases/download/$version/$name" -OutFile $package -TimeoutSec 180
+          $expected = '2b56ce117f803fc70c103cb423bd040e395e40370f6ff6e10818e9ff9c26a323'
+          if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ne $expected) {
+              throw 'The Velopack tool did not match the pinned release.'
+          }
+          $config = Join-Path $env:RUNNER_TEMP 'velopack.NuGet.Config'
+          '<configuration><packageSources><clear/><add key="local" value="velopack-packages"/></packageSources></configuration>' |
+              Set-Content -LiteralPath $config
+          $tools = Join-Path $env:RUNNER_TEMP 'velopack-tools'
+          dotnet tool install vpk --tool-path $tools --version $version --configfile $config
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tools >> $env:GITHUB_PATH
+
+      - name: Package the Windows installer and update feed
+        if: github.ref_type == 'tag' && env.SCANNER_WORKBENCH_UPDATE_REPOSITORY == github.repository
+        shell: pwsh
+        run: |
+          $options = @{
+              PackageDirectory = 'dist/Scanner-Workbench'
+              Version = $env:SCANNER_WORKBENCH_VERSION
+              OutputDirectory = 'dist/installer'
+          }
+          $assets = ./scripts/package-scanner-installer.ps1 @options
+          New-Item -ItemType Directory -Path dist/update-assets | Out-Null
+          Copy-Item -LiteralPath @($assets | Where-Object { $_ -is [IO.FileInfo] } | ForEach-Object FullName) -Destination dist/update-assets
+
+      - name: Verify an isolated upgrade
+        if: (github.ref_type == 'tag' && env.SCANNER_WORKBENCH_UPDATE_REPOSITORY == github.repository) || inputs.verify_upgrade
+        shell: pwsh
+        run: |
+          $work = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'scanner-update-test')
+          $env:SCANNER_WORKBENCH_UPDATE_REPOSITORY = ''
+          foreach ($version in '0.1.0','0.1.1') {
+              $env:SCANNER_WORKBENCH_VERSION = $version
+              rustup run $env:RUST_TOOLCHAIN cargo build --locked --release --target $env:SCANNER_TARGET --features scanner-update-smoke --bin scanner-workstation
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              $stage = Join-Path $work.FullName "stage-$version"
+              ./scripts/package-scanner.ps1 -Binary "target/$env:SCANNER_TARGET/release/scanner-workstation.exe" -OutputDirectory $stage -ExpectedVersion $version
+              ./scripts/package-scanner-installer.ps1 -PackageDirectory (Join-Path $stage 'Scanner-Workbench') -Version $version -OutputDirectory (Join-Path $work.FullName "pack-$version") -ForLocalTest
+          }
+          ./scripts/test-scanner-update.ps1 -OldPortableZip (Join-Path $work.FullName 'pack-0.1.0/ScannerWorkbenchApp-win-x86-Portable.zip') -NewFeed (Join-Path $work.FullName 'pack-0.1.1') -OutputDirectory (Join-Path $work.FullName 'upgrade')
+
+      - name: Verify release contents
+        shell: pwsh
+        run: |
+          $drop = New-Item -ItemType Directory -Path release-assets
+          Copy-Item -LiteralPath 'dist/scanner-workbench-mfc3-windows-x86.zip','dist/scanner-workbench-mfc3-windows-x86.zip.sha256' -Destination $drop
+          if (Test-Path -LiteralPath 'dist/update-assets') {
+              Copy-Item -LiteralPath 'dist/update-assets' -Destination $drop -Recurse
+          }
+          python tools/check_release_artifacts.py release-assets
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scanner-workbench-mfc3-windows-x86
+          path: release-assets/
+          if-no-files-found: error
+          compression-level: 0
+
+  draft-release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: scanner-workbench-mfc3-windows-x86
+          path: release-assets
+
+      - name: Verify the ZIP checksum
+        working-directory: release-assets
+        run: sha256sum --check scanner-workbench-mfc3-windows-x86.zip.sha256
+
+      - name: Create the GitHub draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          update_assets=(release-assets/update-assets/*)
+          gh release create "$GITHUB_REF_NAME" \
+            release-assets/scanner-workbench-mfc3-windows-x86.zip \
+            release-assets/scanner-workbench-mfc3-windows-x86.zip.sha256 \
+            "${update_assets[@]}" \
+            --verify-tag --draft --notes-from-tag \
+            --title "Scanner Workbench ${GITHUB_REF_NAME#workbench-v}"
