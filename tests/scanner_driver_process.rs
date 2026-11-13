@@ -1741,7 +1741,9 @@ fn connect_tries_another_mongoose_after_a_stall_and_a_silent_vehicle() {
 #[test]
 fn selected_j2534_driver_supplies_voltage_and_connections() {
     let mongoose = fixture(0);
-    let other = fixture(0);
+    let fixture_dll = fixture(0);
+    let other = fixture_dll.with_file_name("generic_j2534.dll");
+    std::fs::rename(fixture_dll, &other).unwrap();
     let entries = Arc::new(Mutex::new(vec![
         driver_entry("Mongoose-Plus MFC3", &mongoose),
         driver_entry("Other J2534 adapter", &other),
@@ -1760,7 +1762,11 @@ fn selected_j2534_driver_supplies_voltage_and_connections() {
     connect(&tx, 1);
     connected_as(&rx, 1, "Other J2534 adapter", Duration::from_secs(8));
     assert_eq!(marks(&mongoose, "open"), 0);
-    assert_eq!(marks(&other, "channel"), 1);
+    assert_eq!(
+        marks(&other, "channel"),
+        2,
+        "29-bit CAN uses a raw discovery channel followed by ISO-TP"
+    );
 
     send(&tx, Command::Disconnect { id: 2 });
     until(&rx, Duration::from_secs(4), |event| {
