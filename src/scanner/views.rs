@@ -355,7 +355,14 @@ impl Workbench {
                     ("Disconnected", MUTED)
                 };
                 let state = ui.label(appearance::label(label, 15.0).color(color));
-                if let Some(driver) = &self.driver {
+                if self.vehicle_reply.is_some_and(|reply| reply.missed)
+                    || self.connection_error.is_some() && !self.connected
+                {
+                    let link = ui.link("Details").on_hover_text("Open connection details");
+                    if link.clicked() {
+                        self.page = Page::Connection;
+                    }
+                } else if let Some(driver) = &self.driver {
                     state.on_hover_text(driver);
                 }
                 let (dot, _) = ui.allocate_exact_size(Vec2::splat(6.0), egui::Sense::hover());
@@ -701,6 +708,34 @@ impl Workbench {
                         self.check_vehicle_reply();
                     }
                 });
+            }
+            if let Some((checked_at, result)) = &self.vehicle_reply_check {
+                use super::worker::ReplyCheckOutcome;
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong("Last vehicle reply check");
+                    caption(ui, &format!("{} s ago", checked_at.elapsed().as_secs()));
+                    if ui.button("Copy reply check").clicked() {
+                        let mut copy = format!(
+                            "{}\nRequest 0100\n{}",
+                            result.protocol.label(),
+                            result.outcome.label()
+                        );
+                        for reply in &result.responses {
+                            copy.push('\n');
+                            copy.push_str(&reply.label());
+                        }
+                        ui.ctx().copy_text(copy);
+                    }
+                });
+                let color = if result.outcome == ReplyCheckOutcome::Verified {
+                    GREEN
+                } else {
+                    AMBER
+                };
+                ui.colored_label(color, result.outcome.label());
+                for reply in &result.responses {
+                    ui.add(egui::Label::new(RichText::new(reply.label()).color(MUTED)).wrap());
+                }
             }
             ui.collapsing("Protocol override", |ui| {
                 ui.add_enabled_ui(!self.connected && !self.busy, |ui| {

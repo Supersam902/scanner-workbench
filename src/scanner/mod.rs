@@ -37,8 +37,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use worker::{
-    AttemptOutcome, Command, CommandSender, ConnectionAttempt, Event, ReadMode, VehicleReply,
-    VoltageSample,
+    AttemptOutcome, Command, CommandSender, ConnectionAttempt, Event, ReadMode, ReplyCheck,
+    VehicleReply, VoltageSample,
 };
 
 pub const VERSION: &str = env!("SCANNER_WORKBENCH_VERSION");
@@ -202,6 +202,7 @@ pub struct Workbench {
     voltage: Option<VoltageSample>,
     connection_id: Option<u64>,
     vehicle_reply: Option<VehicleReply>,
+    vehicle_reply_check: Option<(Instant, ReplyCheck)>,
     connection_attempts: Vec<ConnectionAttempt>,
     connection_error: Option<String>,
     adapter_connect: Option<u64>,
@@ -352,6 +353,7 @@ impl Workbench {
             voltage: None,
             connection_id: None,
             vehicle_reply: None,
+            vehicle_reply_check: None,
             connection_attempts: Vec::new(),
             connection_error: None,
             adapter_connect: None,
@@ -597,6 +599,7 @@ impl Workbench {
         self.protocol.clear();
         self.connection_id = None;
         self.vehicle_reply = None;
+        self.vehicle_reply_check = None;
         self.connecting = true;
         self.busy = true;
         self.connection_attempts.clear();
@@ -632,6 +635,7 @@ impl Workbench {
         self.connected = false;
         self.demo = true;
         self.vehicle_reply = None;
+        self.vehicle_reply_check = None;
         self.observed_vin = None;
         self.vehicle = Vehicle {
             model: "Practice vehicle".into(),
@@ -1087,6 +1091,7 @@ impl Workbench {
                     self.pid_support = pid_support;
                     self.live_grouping_fell_back = false;
                     self.connection_id = (!demo).then_some(id);
+                    self.vehicle_reply_check = None;
                     self.vehicle_reply = (!demo).then(|| VehicleReply {
                         last_reply: Instant::now(),
                         missed: false,
@@ -1144,9 +1149,21 @@ impl Workbench {
                     }
                     self.vehicle_reply = Some(reply);
                 }
+                Event::VehicleReplyChecked {
+                    connection,
+                    operation,
+                    check,
+                } if self.connection_id == Some(connection)
+                    && operation == self.epoch
+                    && !self.cancel.load(Ordering::Relaxed) =>
+                {
+                    self.vehicle_reply_check = Some((Instant::now(), check));
+                }
                 Event::LinkLost(id, reason) if self.connection_id == Some(id) => {
                     self.voltage = None;
-                    self.connection_failed(format!("{reason}. Click Connect to try again."));
+                    let message = format!("{reason}. Click Connect to try again.");
+                    self.connection_error = Some(message.clone());
+                    self.connection_failed(message);
                 }
                 Event::Disconnected(id) if id == self.epoch => {
                     self.busy = false;

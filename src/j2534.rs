@@ -39,6 +39,12 @@ pub(crate) const KLINE_SESSION_IDLE_MS: u32 = 5000;
 // SAE J1699/4 §5.4 recommends this gap before a 5-baud init after a fast pulse.
 const KLINE_FAST_WAKE_IDLE_MS: u32 = 2600;
 
+pub(crate) fn is_pid00_reply(reply: &DiagnosticResponse) -> bool {
+    reply.transport_error.is_none()
+        && reply.payload.starts_with(&[0x41, 0])
+        && reply.payload.len() >= 6
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CanProtocol {
     #[default]
@@ -820,11 +826,7 @@ impl J2534 {
             );
             return Err(reply_failure(detail));
         }
-        if !replies.iter().any(|reply| {
-            reply.transport_error.is_none()
-                && reply.payload.starts_with(&[0x41, 0])
-                && reply.payload.len() >= 6
-        }) {
+        if !replies.iter().any(is_pid00_reply) {
             let detail = reply_detail
                 .unwrap_or("Vehicle did not answer the supported-PID request with a valid bitmap");
             return Err(reply_failure(error(detail)));

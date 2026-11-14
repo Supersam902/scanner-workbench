@@ -1,12 +1,13 @@
 use super::codes;
 use super::driver::{DriverProcess, Request, Value};
 use super::live_reads;
-use super::model::{load_json, save_json, unavailable};
+use super::model::{ecu_label, load_json, save_json, unavailable};
 use crate::adapter::{DiagnosticAdapter, DiagnosticResponse, DiagnosticTarget, encode_hex};
 use crate::diagnostics::{self, Job, PidSupport, Query, Reading, SupportScan, Update};
 use crate::elm327::{ConnectionInfo, Elm327Error, block_on};
 use crate::j2534::{
     CanProtocol, DriverInfo, KLINE_SESSION_IDLE_MS, ProbePhase, discover_drivers, format_voltage,
+    is_pid00_reply,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -106,6 +107,11 @@ pub enum Event {
     Disconnected(u64),
     LinkLost(u64, String),
     VehicleReply(u64, VehicleReply),
+    VehicleReplyChecked {
+        connection: u64,
+        operation: u64,
+        check: ReplyCheck,
+    },
     Voltage(Option<VoltageSample>),
     Failed(u64, String),
     Log(u64, String),
@@ -173,6 +179,139 @@ struct LastConnection {
 pub struct VehicleReply {
     pub last_reply: Instant,
     pub missed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplyCheck {
+    pub outcome: ReplyCheckOutcome,
+    pub protocol: CanProtocol,
+    pub responses: Vec<ReplyEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplyCheckOutcome {
+    Verified,
+    Partial,
+    Rejected,
+    Incomplete,
+    Silent,
+    Failed,
+}
+
+impl ReplyCheckOutcome {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Verified => "Vehicle replied. Support bitmap verified.",
+            Self::Partial => "Vehicle replied. Some ECU results are unverified.",
+            Self::Rejected => "ECU rejected the support request.",
+            Self::Incomplete => "No complete support bitmap received.",
+            Self::Silent => "No vehicle reply received.",
+            Self::Failed => "Vehicle reply check failed.",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplyEvidence {
+    pub source: Option<u32>,
+    pub description: String,
+    pub raw: String,
+}
+
+impl ReplyEvidence {
+    pub(crate) fn label(&self) -> String {
+        let description = if let Some(source) = self.source {
+            format!("ECU {} · {}", ecu_label(Some(source)), self.description)
+        } else {
+            self.description.clone()
+        };
+        if self.raw.is_empty() {
+            description
+        } else {
+            format!("{description} · {}", self.raw)
+        }
+    }
+}
+
+impl ReplyCheck {
+    fn from_result(
+        result: Result<Vec<DiagnosticResponse>, Elm327Error>,
+        expected: &BTreeSet<Option<u32>>,
+        protocol: CanProtocol,
+    ) -> Self {
+        let replies = match result {
+            Ok(replies) => replies,
+            Err(error) => {
+                let outcome = if matches!(error, Elm327Error::Timeout(_)) {
+                    ReplyCheckOutcome::Silent
+                } else {
+                    ReplyCheckOutcome::Failed
+                };
+                return Self {
+                    outcome,
+                    protocol,
+                    responses: vec![ReplyEvidence {
+                        source: None,
+                        description: error.to_string(),
+                        raw: String::new(),
+                    }],
+                };
+            }
+        };
+        let mut verified = 0;
+        let mut rejected = 0;
+        let mut responses: Vec<_> = replies
+            .iter()
+            .map(|reply| {
+                let description = if is_pid00_reply(reply) {
+                    verified += 1;
+                    "Support bitmap verified".into()
+                } else if let Some(error) = &reply.transport_error {
+                    error.clone()
+                } else {
+                    match reply.payload.as_slice() {
+                        [0x7f, 1, 0x78] => "Support reply remained pending".into(),
+                        [0x7f, 1, code] => {
+                            rejected += 1;
+                            format!("Support request rejected (NRC {code:02X})")
+                        }
+                        [0x41, 0, ..] => "Support bitmap is truncated".into(),
+                        _ => "Unexpected support reply".into(),
+                    }
+                };
+                ReplyEvidence {
+                    source: reply.source,
+                    description,
+                    raw: encode_hex(&reply.payload),
+                }
+            })
+            .collect();
+        let mut outcome = match responses.len() {
+            0 => ReplyCheckOutcome::Silent,
+            count if verified == count => ReplyCheckOutcome::Verified,
+            _ if verified > 0 => ReplyCheckOutcome::Partial,
+            count if rejected == count => ReplyCheckOutcome::Rejected,
+            _ => ReplyCheckOutcome::Incomplete,
+        };
+        for &source in expected.iter().flatten() {
+            if replies.iter().any(|reply| reply.source == Some(source)) {
+                continue;
+            }
+            if outcome == ReplyCheckOutcome::Verified {
+                outcome = ReplyCheckOutcome::Partial;
+            }
+            responses.push(ReplyEvidence {
+                source: Some(source),
+                description: "No reply from this previously seen ECU".into(),
+                raw: String::new(),
+            });
+        }
+        Self {
+            outcome,
+            protocol,
+            responses,
+        }
+    }
 }
 
 pub struct VoltageSample {
@@ -381,7 +520,13 @@ impl PhysicalLink {
     ) {
         match result {
             Ok(Value::Replies(replies)) => {
-                let mut answered = replies.iter().filter(|reply| is_vehicle_reply(reply));
+                let mut answered = replies.iter().filter(|reply| {
+                    if bytes == [1, 0] {
+                        is_pid00_reply(reply)
+                    } else {
+                        is_vehicle_reply(reply)
+                    }
+                });
                 let Some(first) = answered.next() else {
                     return;
                 };
@@ -1619,23 +1764,24 @@ fn run(
                         let _ = tx.send(Event::InitialVin(id, rows));
                     }
                 } else if matches!(mode, ReadMode::CheckVehicleReply) {
-                    completion = match adapter {
-                        Link::Physical(physical) => match physical.read(None, &[1, 0], 2000) {
-                            Ok(replies) if replies.iter().any(is_vehicle_reply) => {
-                                "Vehicle replied.".into()
-                            }
-                            Ok(replies) => replies
-                                .iter()
-                                .find_map(|reply| reply.transport_error.as_deref())
-                                .map_or_else(
-                                    || "No complete vehicle reply received.".into(),
-                                    |error| format!("Could not verify a vehicle reply. {error}"),
-                                ),
-                            Err(Elm327Error::Timeout(_)) => "No vehicle reply received.".into(),
-                            Err(error) => format!("Could not verify a vehicle reply. {error}"),
-                        },
-                        Link::Demo(_) => "Connect to a vehicle to check its reply.".into(),
-                    };
+                    if let Link::Physical(physical) = adapter {
+                        let protocol = physical.protocol;
+                        let check = ReplyCheck::from_result(
+                            physical.read(None, &[1, 0], 2000),
+                            pid_scan.known_sources(),
+                            protocol,
+                        );
+                        completion = check.outcome.label().into();
+                        if !cancel.load(Ordering::Relaxed) && physical.driver.failure().is_none() {
+                            let _ = tx.send(Event::VehicleReplyChecked {
+                                connection: physical.id,
+                                operation: id,
+                                check,
+                            });
+                        }
+                    } else {
+                        completion = "Connect to a vehicle to check its reply.".into();
+                    }
                 } else if matches!(discovery, Some((1, _))) {
                     let mut refresh = pid_scan.refresh();
                     while refresh.support.next_range.is_some()

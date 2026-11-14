@@ -748,6 +748,17 @@ uint32_t API PassThruReadMsgs(uint32_t channel, Message *message, uint32_t *coun
         if (FIXTURE_MODE == 15 && request[0] == 1 && request_len == 2) {
             if (request[1] == 0 && health_bitmap_reads != 2) {
                 const uint8_t bitmap[] = {0x41, 0, 8, 0x10, 0, 0};
+                const uint8_t rejected[] = {0x7f, 1, 0x12};
+                if (health_bitmap_reads == 4 || (health_bitmap_reads == 5 && source != engine_source)) {
+                    return reply(message, count, source, rejected, sizeof(rejected));
+                }
+                if (health_bitmap_reads == 3) {
+                    return reply(message, count, source, bitmap, 3);
+                }
+                if (health_bitmap_reads == 6 && source != engine_source) {
+                    *count = 0;
+                    return 0x10;
+                }
                 return reply(message, count, source, bitmap, sizeof(bitmap));
             }
             if (request[1] == 0x0c && source == engine_source && health_rpm_reads != 2) {

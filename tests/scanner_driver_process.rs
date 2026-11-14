@@ -6,7 +6,7 @@ use obd_dashboard::scanner::{
     model::{Results, Sample},
     worker::{
         AttemptOutcome, Command, CommandSender, ConnectionAttempt, Event, ReadMode,
-        spawn_with_driver, spawn_with_driver_state,
+        ReplyCheckOutcome, spawn_with_driver, spawn_with_driver_state,
     },
 };
 use std::path::{Path, PathBuf};
@@ -504,8 +504,12 @@ fn vehicle_reply_state_distinguishes_silence_from_partial_or_unverified_reads() 
         (5, 0x0c, Some(true), None),
         (6, 0x0c, Some(false), Some("410C0C80")),
         (7, 0x00, Some(true), None),
-        (8, 0x0f, Some(false), Some("7F0112")),
-        (9, 0x00, Some(false), None),
+        (8, 0x00, None, None),
+        (9, 0x00, None, None),
+        (10, 0x00, Some(false), None),
+        (11, 0x00, Some(false), None),
+        (12, 0x00, Some(false), None),
+        (13, 0x0f, Some(false), Some("7F0112")),
     ] {
         if pid == 0 {
             send(
@@ -524,12 +528,20 @@ fn vehicle_reply_state_distinguishes_silence_from_partial_or_unverified_reads() 
         let deadline = Instant::now() + Duration::from_secs(7);
         let mut states = Vec::new();
         let mut rows = Vec::new();
+        let mut check_report = None;
         let completion = loop {
             match rx
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .unwrap()
             {
                 Event::VehicleReply(1, state) => states.push(state),
+                Event::VehicleReplyChecked {
+                    connection: 1,
+                    operation,
+                    check,
+                } if operation == id => {
+                    assert!(check_report.replace(check).is_none());
+                }
                 Event::Rows(op, new) if op == id => rows.extend(new),
                 Event::Finished(op, message) if op == id => break message,
                 Event::LinkLost(_, reason) | Event::Failed(_, reason) => panic!("{reason}"),
@@ -551,14 +563,51 @@ fn vehicle_reply_state_distinguishes_silence_from_partial_or_unverified_reads() 
         }
         if pid == 0 {
             assert!(rows.is_empty());
-            assert_eq!(
-                completion,
-                if missed == Some(true) {
-                    "No vehicle reply received."
-                } else {
-                    "Vehicle replied."
-                }
+            use ReplyCheckOutcome::{Incomplete, Partial, Rejected, Silent, Verified};
+            let (outcome, message, evidence) = match id {
+                7 => (Silent, "No vehicle reply received.", "no vehicle response"),
+                8 => (
+                    Incomplete,
+                    "No complete support bitmap received.",
+                    "Support bitmap is truncated",
+                ),
+                9 => (Rejected, "ECU rejected the support request.", "7F0112"),
+                10 => (
+                    Partial,
+                    "Vehicle replied. Some ECU results are unverified.",
+                    "Support request rejected (NRC 12)",
+                ),
+                11 => (
+                    Partial,
+                    "Vehicle replied. Some ECU results are unverified.",
+                    "No reply from this previously seen ECU",
+                ),
+                12 => (
+                    Verified,
+                    "Vehicle replied. Support bitmap verified.",
+                    "410008100000",
+                ),
+                _ => unreachable!(),
+            };
+            assert_eq!(completion, message);
+            let check_report = check_report.expect("explicit check result");
+            assert_eq!(check_report.outcome, outcome);
+            assert_eq!(check_report.protocol, CanProtocol::Can29Bit500K);
+            assert!(
+                check_report
+                    .responses
+                    .iter()
+                    .any(|reply| reply.description.contains(evidence) || reply.raw == evidence),
+                "{check_report:?}"
             );
+            if matches!(id, 10..=12) {
+                assert!(
+                    check_report.responses.iter().any(
+                        |reply| reply.source == Some(0x18daf127) && reply.raw == "410008100000"
+                    ),
+                    "{check_report:?}"
+                );
+            }
         } else if let Some(raw) = expected_raw {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].source, Some(0x18DAF127));
@@ -571,8 +620,8 @@ fn vehicle_reply_state_distinguishes_silence_from_partial_or_unverified_reads() 
     }
     assert_eq!(
         marks(&dll, "pidmap-00"),
-        3,
-        "only connect and the two explicit checks sent PID 00"
+        7,
+        "only connect and the explicit checks sent PID 00"
     );
 }
 

@@ -2210,7 +2210,7 @@ fn header_vin_highlights_on_hover_copies_and_resets_between_connections() {
 
 #[test]
 fn vehicle_reply_status_uses_the_connection_id_and_preserves_scan_results() {
-    use super::worker::VehicleReply;
+    use super::worker::{ReplyCheck, ReplyCheckOutcome, ReplyEvidence, VehicleReply};
 
     let mut app = Workbench::new(temp("vehicle-reply"));
     let (events, rx) = mpsc::channel();
@@ -2240,6 +2240,75 @@ fn vehicle_reply_status_uses_the_connection_id_and_preserves_scan_results() {
     assert!(app.connected && app.vehicle_reply.unwrap().missed);
     assert_eq!(app.results.rows.len(), 1);
 
+    let check = ReplyCheck {
+        outcome: ReplyCheckOutcome::Incomplete,
+        protocol: CanProtocol::Can11Bit500K,
+        responses: vec![ReplyEvidence {
+            source: Some(0x7e8),
+            description: "Support bitmap is truncated".into(),
+            raw: "410080".into(),
+        }],
+    };
+    let publish_check = |connection, operation| {
+        events
+            .send(Event::VehicleReplyChecked {
+                connection,
+                operation,
+                check: check.clone(),
+            })
+            .unwrap();
+    };
+    publish_check(id, app.epoch - 1);
+    publish_check(id - 1, app.epoch);
+    app.tick();
+    assert!(app.vehicle_reply_check.is_none());
+    publish_check(id, app.epoch);
+    app.tick();
+    assert_eq!(
+        app.vehicle_reply_check.as_ref().map(|(_, result)| result),
+        Some(&check)
+    );
+
+    app.page = Page::Connection;
+    let ctx = render_context();
+    let draw = |app: &mut Workbench, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    };
+    let output = draw(&mut app, vec![]);
+    let pos = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == "Copy reply check" => {
+                Some(text.visual_bounding_rect().center())
+            }
+            _ => None,
+        })
+        .expect("reply check has a copy button");
+    let button = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    draw(&mut app, vec![egui::Event::PointerMoved(pos), button(true)]);
+    let output = draw(&mut app, vec![button(false)]);
+    assert!(output.platform_output.commands.iter().any(|command| {
+        matches!(command, egui::OutputCommand::CopyText(text)
+            if text.contains("CAN 11-bit / 500 kbit/s\nRequest 0100")
+                && text.contains("ECU 7E8 · Support bitmap is truncated · 410080"))
+    }));
+
     let log_count = app.logs.len();
     events.send(Event::VehicleReply(id, missed)).unwrap();
     let replied = VehicleReply {
@@ -2260,8 +2329,18 @@ fn vehicle_reply_status_uses_the_connection_id_and_preserves_scan_results() {
         .send(Event::LinkLost(id, "Cable disconnected".into()))
         .unwrap();
     events.send(Event::VehicleReply(id, missed)).unwrap();
+    publish_check(id, app.epoch);
     app.tick();
     assert!(!app.connected && app.vehicle_reply.is_none());
+    assert_eq!(
+        app.vehicle_reply_check.as_ref().map(|(_, result)| result),
+        Some(&check)
+    );
+    assert!(
+        app.connection_error
+            .as_deref()
+            .is_some_and(|error| error.contains("Cable disconnected"))
+    );
 }
 
 #[test]

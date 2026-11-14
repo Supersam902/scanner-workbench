@@ -77,8 +77,11 @@ vehicle applied.
 
 The Connection page shows the age of the last vehicle reply. Two missed
 requests for known live PIDs can show No vehicle reply while the cable
-stays connected. Check vehicle reply sends one supported-PID request and
-updates that indicator. The next ECU reply restores the Connected status.
+stays connected. Click Details beside the connection status for the
+Connection page. Check vehicle reply sends one supported-PID request.
+The result identifies verified and incomplete replies, ECU rejections, and
+previously seen ECUs that missed the check. Copy reply check includes the
+protocol, ECU addresses, raw replies, and errors from that check.
 
 Using results
 This build uses generic emissions OBD-II. Available codes, PIDs, freeze frames,
