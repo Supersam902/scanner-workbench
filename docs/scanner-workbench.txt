@@ -1,11 +1,15 @@
 SCANNER WORKBENCH
 Windows 32-bit build, November 13, 2026, revision 26
 
-1. Attach the J2534 adapter to the PC and the vehicle. Turn the ignition on.
+1. Attach the adapter to the vehicle and connect it to the PC. Turn the ignition on.
 2. Open Scanner Workbench from the desktop shortcut or the executable in this folder.
-3. Click Connect at the top. Automatic checks installed 32-bit J2534 04.04
-   drivers and connects after a verified OBD-II reply. Choose a driver under
-   Connection > Adapter to use a particular cable.
+3. Open Connection > Adapter if you need to change the adapter type.
+   J2534 uses an installed 32-bit J2534 04.04 driver. Automatic finds an
+   active cable, or you can select a driver. For ELM-compatible serial,
+   choose the COM port the USB or paired Bluetooth adapter appears on.
+   Leave the baud rate blank to detect it. For ELM-compatible Wi-Fi / TCP,
+   enter the host and port from the adapter's instructions. Click Connect
+   at the top. Workbench verifies an OBD-II reply before showing a connection.
    After Connect, the VIN field beside DLC voltage shows the VIN received
    from the vehicle. Hover to highlight it, then click to copy it. The field
    displays Copied briefly. If the VIN is unavailable, use Read VIN under
@@ -45,11 +49,13 @@ DLC voltage
 One readout at the top shows voltage at the vehicle's diagnostic connector.
 The adapter reads it about every two seconds, including between diagnostic
 requests. Before Connect and during practice, it can sample the connector
-through a cable with no diagnostic session open. Hover over the voltage to
-see which driver supplied it. A dash means a current sample is unavailable.
+through a cable with no diagnostic session open. Use this adapter saves the
+ELM settings and starts the voltage readout without connecting to a vehicle.
+ELM voltage depends on the adapter's voltage measurement support. Hover
+over the voltage to see the adapter. A dash means a current sample is unavailable.
 
 Connection details
-Automatic Connect tries the last verified protocol for the matching driver
+J2534 checks the last verified protocol for the matching driver
 first, even after an app restart. It looks for a fresh supported-PID reply
 and continues the automatic search if the saved protocol fails. The normal
 search order is 11-bit and 29-bit CAN at 500 and 250 kbit/s, KWP2000 fast
@@ -61,7 +67,7 @@ current attempt or wait. Connection lists each driver and protocol tried
 in the latest connection check, including failures opening or setting up a
 channel, failures sending a request and requests with no verified ECU reply.
 Copy results copies the outcomes and the driver's error text.
-Use Protocol override there to limit Connect to a single protocol. A known
+Use the J2534 Protocol override to limit Connect to a single protocol. A known
 29-bit ECU source limits Connect to 29-bit CAN. Overrides last until the
 app closes.
 
@@ -75,6 +81,11 @@ driver in a separate process. If it loses the diagnostic channel or
 stops responding, click Connect to start a fresh session. If an emissions
 clear was interrupted, read the codes and readiness again to see what the
 vehicle applied.
+
+An ELM connection needs automatic protocol detection and standard ECU
+headers. While its voltage readout is active, Workbench can hold the COM
+port or TCP socket open. Close Workbench or choose another adapter to free
+that connection for another application.
 
 The Connection page shows the age of the last vehicle reply. Two missed
 requests for known live PIDs can show No vehicle reply while the cable

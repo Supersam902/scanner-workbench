@@ -6,9 +6,12 @@ fn main() {}
 fn main() -> eframe::Result {
     use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
     let args: Vec<_> = std::env::args_os().collect();
-    if args.get(1).is_some_and(|arg| arg == "--j2534-worker") {
+    if args
+        .get(1)
+        .is_some_and(|arg| arg == "--adapter-worker" || arg == "--j2534-worker")
+    {
         if let Err(error) = obd_dashboard::scanner::driver::serve() {
-            eprintln!("J2534 worker: {error}");
+            eprintln!("Adapter worker: {error}");
             std::process::exit(1);
         }
         return Ok(());

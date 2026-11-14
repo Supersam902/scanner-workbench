@@ -331,9 +331,9 @@ impl Workbench {
                     })
                     .response
                     .on_hover_ui(|ui| {
-                        ui.label("Voltage at pin 16 of the diagnostic connector");
+                        ui.label("Voltage reported by the adapter");
                         if let Some(sample) = sample {
-                            ui.label(&sample.driver.name);
+                            ui.label(sample.adapter.label());
                         }
                     });
 
@@ -689,10 +689,8 @@ impl Workbench {
             if let Some(driver) = &self.driver {
                 ui.label(RichText::new(driver).size(18.0).strong());
                 caption(ui, &self.protocol);
-            } else {
-                ui.label(RichText::new("J2534 adapter").size(18.0).strong());
             }
-            self.driver_picker(ui);
+            self.adapter_picker(ui);
             if let Some(reply) = self.vehicle_reply {
                 ui.horizontal_wrapped(|ui| {
                     let age = reply.last_reply.elapsed().as_secs();
@@ -740,7 +738,8 @@ impl Workbench {
                     ui.add(egui::Label::new(RichText::new(reply.label()).color(MUTED)).wrap());
                 }
             }
-            ui.collapsing("Protocol override", |ui| {
+            if self.adapter_kind == AdapterKind::J2534 {
+                ui.collapsing("Protocol override", |ui| {
                 ui.add_enabled_ui(!self.connected && !self.busy, |ui| {
                     egui::ComboBox::from_id_salt("scanner_protocol")
                         .width(325.0)
@@ -765,7 +764,8 @@ impl Workbench {
                     }
                 });
                 caption(ui, "Automatic tries the last verified protocol for the driver first. An override limits Connect to the selected protocol until the app closes.");
-            });
+                });
+            }
         });
         if self.has_connection_details() {
             ui.add_space(8.0);
@@ -791,6 +791,104 @@ impl Workbench {
                 ),
             );
         });
+    }
+
+    fn adapter_picker(&mut self, ui: &mut egui::Ui) {
+        let enabled = !self.busy && (!self.connected || self.demo);
+        let previous = self.adapter_kind;
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Adapter type");
+                egui::ComboBox::from_id_salt("workbench_adapter_type")
+                    .width(236.0)
+                    .selected_text(self.adapter_kind.label())
+                    .show_ui(ui, |ui| {
+                        for kind in AdapterKind::ALL {
+                            ui.selectable_value(&mut self.adapter_kind, kind, kind.label());
+                        }
+                    });
+            });
+        });
+        if previous != self.adapter_kind {
+            self.adapter_problem = None;
+            if self.adapter_kind == AdapterKind::J2534 {
+                self.apply_adapter_choice();
+            }
+        }
+        if self.adapter_kind == AdapterKind::J2534 {
+            self.driver_picker(ui);
+            if self.elm_connection.is_some()
+                && ui
+                    .add_enabled(enabled, egui::Button::new("Use J2534"))
+                    .clicked()
+            {
+                self.apply_adapter_choice();
+            }
+        } else {
+            ui.add_enabled_ui(enabled, |ui| match self.adapter_kind {
+                AdapterKind::Serial => {
+                    let ports = self
+                        .serial_ports
+                        .get_or_insert_with(crate::elm327::scan_ports);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("COM / serial port");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.serial_port)
+                                .desired_width(112.0)
+                                .hint_text("COM port"),
+                        );
+                        egui::ComboBox::from_id_salt("workbench_serial_ports")
+                            .selected_text("Available ports")
+                            .show_ui(ui, |ui| {
+                                for port in ports.iter() {
+                                    ui.selectable_value(&mut self.serial_port, port.clone(), port);
+                                }
+                            });
+                        if ui.button("Refresh ports").clicked() {
+                            *ports = crate::elm327::scan_ports();
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Baud rate");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.serial_baud)
+                                .desired_width(112.0)
+                                .hint_text("Automatic"),
+                        );
+                    });
+                    caption(
+                        ui,
+                        "USB and paired Bluetooth adapters can appear as a serial port.",
+                    );
+                }
+                AdapterKind::Tcp => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Adapter address");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.tcp_address)
+                                .desired_width(225.0)
+                                .hint_text("192.168.0.10:35000"),
+                        );
+                    });
+                    caption(ui, "Use the host and port specified by your adapter.");
+                }
+                AdapterKind::J2534 => unreachable!("J2534 has its own picker"),
+            });
+            if self.elm_connection_draft().ok().as_ref() == Some(&self.elm_connection)
+                && self.settings.elm_connection == self.elm_connection
+                && self.adapter_problem.is_none()
+            {
+                caption(ui, "Saved for Connect and DLC voltage.");
+            } else if ui
+                .add_enabled(enabled, egui::Button::new("Use this adapter"))
+                .clicked()
+            {
+                self.apply_adapter_choice();
+            }
+        }
+        if let Some(problem) = &self.adapter_problem {
+            ui.colored_label(AMBER, problem);
+        }
     }
 
     fn driver_picker(&mut self, ui: &mut egui::Ui) {

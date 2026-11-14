@@ -9,6 +9,7 @@ use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub use super::elm::ElmConnection;
 pub use super::emissions_scan::Scan as EmissionsScan;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -109,6 +110,8 @@ pub struct Settings {
     pub last_vehicle: Option<Vehicle>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_driver: Option<DriverInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elm_connection: Option<ElmConnection>,
 }
 
 impl Settings {

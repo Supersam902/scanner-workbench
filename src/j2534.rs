@@ -1286,7 +1286,7 @@ impl J2534 {
     }
 }
 
-fn matches_request(reply: &[u8], request: &[u8], can: bool) -> bool {
+pub(crate) fn matches_request(reply: &[u8], request: &[u8], can: bool) -> bool {
     reply.starts_with(&[0x7F, request[0]])
         || (reply.first() == Some(&request[0].wrapping_add(0x40))
             && match request[0] {

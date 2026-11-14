@@ -1,5 +1,6 @@
 //! The scanner UI never loads a vendor DLL. This private pipe protocol runs
-//! J2534 in a child of the same executable and bounds the wait for every call.
+//! J2534 and ELM I/O in a child of the same executable and bounds every call.
+use super::elm::{ElmEndpoint, Session};
 use crate::adapter::{DiagnosticAdapter, DiagnosticResponse, DiagnosticTarget};
 use crate::elm327::{Elm327Error, block_on};
 use crate::j2534::{CanProtocol, J2534, ProbePhase};
@@ -22,7 +23,9 @@ const CLOSE_TIMEOUT: Duration = Duration::from_millis(1200);
 #[derive(Serialize, Deserialize)]
 pub(super) enum Request {
     Open(PathBuf),
+    OpenElm(ElmEndpoint),
     Probe(CanProtocol, Option<u8>),
+    ProbeElm,
     Read {
         bytes: Vec<u8>,
         target: Option<DiagnosticTarget>,
@@ -35,11 +38,12 @@ pub(super) enum Request {
 impl Request {
     fn limits(&self) -> (&'static str, Duration) {
         let (name, millis) = match self {
-            Self::Open(_) => ("opening the cable", 5_000),
+            Self::Open(_) | Self::OpenElm(_) => ("opening the adapter", 5_000),
             Self::Probe(protocol, _) => (
                 "checking the vehicle protocol",
                 if protocol.is_kline() { 12_000 } else { 8_000 },
             ),
+            Self::ProbeElm => ("detecting the vehicle protocol with ELM", 30_000),
             Self::Read { timeout_ms, .. } => (
                 "reading the ECU response",
                 timeout_ms.min(&MAX_REQUEST_MS) + 2_000,
@@ -59,6 +63,11 @@ pub(super) enum Value {
         phase: ProbePhase,
         message: String,
         kline_retry_ms: u32,
+    },
+    ElmProbed {
+        protocol: CanProtocol,
+        identity: String,
+        replies: Vec<DiagnosticResponse>,
     },
     ReadTimeout(String),
     Voltage(u32),
@@ -119,7 +128,7 @@ pub fn serve() -> io::Result<()> {
         let value = handle_request(&mut adapter, request);
         let link_failure = adapter
             .as_ref()
-            .and_then(J2534::link_failure)
+            .and_then(Device::failure)
             .map(str::to_owned);
         write_frame(
             &mut output,
@@ -135,51 +144,105 @@ pub fn serve() -> io::Result<()> {
     Ok(())
 }
 
-fn handle_request(adapter: &mut Option<J2534>, request: Request) -> Result<Value, String> {
+enum Device {
+    J2534(Box<J2534>),
+    Elm(Session),
+}
+
+impl Device {
+    fn failure(&self) -> Option<&str> {
+        match self {
+            Self::J2534(adapter) => adapter.link_failure(),
+            Self::Elm(adapter) => adapter.failure.as_deref(),
+        }
+    }
+}
+
+fn handle_request(adapter: &mut Option<Device>, request: Request) -> Result<Value, String> {
     match request {
         Request::Open(path) => {
             if adapter.is_some() {
                 return Err("A cable is already open".into());
             }
-            *adapter = Some(J2534::open_device(&path).map_err(|e| e.to_string())?);
+            *adapter = Some(Device::J2534(Box::new(
+                J2534::open_device(&path).map_err(|e| e.to_string())?,
+            )));
+            Ok(Value::Done)
+        }
+        Request::OpenElm(endpoint) => {
+            if adapter.is_some() {
+                return Err("An adapter is already open".into());
+            }
+            *adapter = Some(Device::Elm(
+                Session::open(endpoint).map_err(|e| e.to_string())?,
+            ));
             Ok(Value::Done)
         }
         Request::Close => {
-            drop(adapter.take());
+            if let Some(Device::Elm(elm)) = adapter.take() {
+                block_on(elm.close());
+            }
             Ok(Value::Done)
         }
         other => {
             let adapter = adapter.as_mut().ok_or("No open cable")?;
-            match other {
-                Request::Probe(protocol, ecu) => match adapter.probe_vehicle(protocol, ecu) {
-                    Ok(replies) => Ok(Value::Replies(replies)),
-                    Err(failure) => {
-                        let mut message = failure.error.to_string();
-                        if let Some(cleanup) = failure.cleanup {
-                            message.push_str(&format!(" Channel cleanup failed. {cleanup}"));
+            match (adapter, other) {
+                (Device::J2534(adapter), Request::Probe(protocol, ecu)) => {
+                    match adapter.probe_vehicle(protocol, ecu) {
+                        Ok(replies) => Ok(Value::Replies(replies)),
+                        Err(failure) => {
+                            let mut message = failure.error.to_string();
+                            if let Some(cleanup) = failure.cleanup {
+                                message.push_str(&format!(" Channel cleanup failed. {cleanup}"));
+                            }
+                            Ok(Value::ProbeFailed {
+                                phase: failure.phase,
+                                message,
+                                kline_retry_ms: adapter.kline_retry_ms(),
+                            })
                         }
-                        Ok(Value::ProbeFailed {
-                            phase: failure.phase,
-                            message,
-                            kline_retry_ms: adapter.kline_retry_ms(),
-                        })
                     }
-                },
-                Request::Voltage => adapter.read_battery_millivolts().map(Value::Voltage),
-                Request::Read {
-                    bytes,
-                    target,
-                    timeout_ms,
-                } => {
+                }
+                (Device::Elm(adapter), Request::ProbeElm) => {
+                    block_on(adapter.probe()).map(|(protocol, identity, replies)| {
+                        Value::ElmProbed {
+                            protocol,
+                            identity,
+                            replies,
+                        }
+                    })
+                }
+                (Device::J2534(adapter), Request::Voltage) => {
+                    adapter.read_battery_millivolts().map(Value::Voltage)
+                }
+                (Device::Elm(adapter), Request::Voltage) => {
+                    block_on(adapter.voltage()).map(Value::Voltage)
+                }
+                (
+                    adapter,
+                    Request::Read {
+                        bytes,
+                        target,
+                        timeout_ms,
+                    },
+                ) => {
                     if bytes.is_empty()
                         || bytes.len() > 16
                         || !(1..=MAX_REQUEST_MS).contains(&timeout_ms)
                     {
                         return Err("Invalid diagnostic request length or timeout".into());
                     }
-                    let replies = match target {
-                        Some(target) => block_on(adapter.request_to(target, &bytes, timeout_ms)),
-                        None => block_on(adapter.request(&bytes, timeout_ms)),
+                    let replies = match (adapter, target) {
+                        (Device::J2534(adapter), Some(target)) => {
+                            block_on(adapter.request_to(target, &bytes, timeout_ms))
+                        }
+                        (Device::J2534(adapter), None) => {
+                            block_on(adapter.request(&bytes, timeout_ms))
+                        }
+                        (Device::Elm(adapter), None) => block_on(adapter.read(&bytes, timeout_ms)),
+                        (Device::Elm(_), Some(_)) => {
+                            return Err("ECU-targeted requests require J2534".into());
+                        }
                     };
                     match replies {
                         Ok(replies) => Ok(Value::Replies(replies)),
@@ -187,7 +250,7 @@ fn handle_request(adapter: &mut Option<J2534>, request: Request) -> Result<Value
                         Err(error) => Err(error),
                     }
                 }
-                Request::Open(_) | Request::Close => unreachable!(),
+                _ => return Err("The adapter cannot run this command".into()),
             }
             .map_err(|e| e.to_string())
         }
@@ -208,7 +271,7 @@ impl DriverProcess {
     pub(super) fn start(exe: &Path, shutdown: Arc<AtomicBool>) -> io::Result<Self> {
         let mut command = Command::new(exe);
         command
-            .arg("--j2534-worker")
+            .arg("--adapter-worker")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -285,6 +348,7 @@ impl DriverProcess {
             Request::Probe(..) => {
                 |value| matches!(value, Value::Replies(_) | Value::ProbeFailed { .. })
             }
+            Request::ProbeElm => |value| matches!(value, Value::ElmProbed { .. }),
             Request::Voltage => |value| matches!(value, Value::Voltage(_)),
             _ => |value| matches!(value, Value::Done),
         };

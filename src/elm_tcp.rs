@@ -12,6 +12,12 @@ pub struct TcpElm {
 
 impl TcpElm {
     pub fn connect(address: &str, progress: impl Fn(&str)) -> Result<Self, Elm327Error> {
+        let mut adapter = Self::open(address)?;
+        crate::elm327::block_on(crate::obd_ops::init_elm(&mut adapter, progress))?;
+        Ok(adapter)
+    }
+
+    pub(crate) fn open(address: &str) -> Result<Self, Elm327Error> {
         let addresses = address
             .to_socket_addrs()
             .map_err(|e| Elm327Error::Serial(e.to_string()))?;
@@ -22,7 +28,7 @@ impl TcpElm {
                     stream
                         .set_write_timeout(Some(Duration::from_secs(2)))
                         .map_err(|e| Elm327Error::Serial(e.to_string()))?;
-                    let mut adapter = Self {
+                    return Ok(Self {
                         stream,
                         info: ConnectionInfo {
                             port: format!("tcp://{address}"),
@@ -31,9 +37,7 @@ impl TcpElm {
                             elm_version: String::new(),
                             voltage: None,
                         },
-                    };
-                    crate::elm327::block_on(crate::obd_ops::init_elm(&mut adapter, progress))?;
-                    return Ok(adapter);
+                    });
                 }
                 Err(error) => last_error = error.to_string(),
             }

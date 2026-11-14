@@ -144,8 +144,8 @@ fn the_driver_picker_restores_the_preference_for_connection_and_voltage() {
         assert_eq!(app.driver_override.as_ref(), Some(&driver));
         assert_eq!(app.status, "Driver preference saved.");
     }
-    let mut app = Workbench::with_worker(root.clone(), |_, selected| {
-        assert_eq!(selected.as_deref(), Some(driver.path.as_path()));
+    let mut app = Workbench::with_worker(root.clone(), |_, settings| {
+        assert_eq!(settings.preferred_driver.as_ref(), Some(&driver));
         worker::spawn_with_driver(None, Vec::new)
     });
     let (events, rx) = mpsc::channel();
@@ -181,14 +181,17 @@ fn the_driver_picker_restores_the_preference_for_connection_and_voltage() {
     ] {
         events
             .send(Event::Voltage(Some(VoltageSample {
-                driver: candidate,
+                adapter: VoltageAdapter::J2534(candidate),
                 millivolts: 12600,
                 sampled_at: Instant::now(),
             })))
             .unwrap();
     }
     app.tick();
-    assert_eq!(app.voltage.as_ref().unwrap().driver, driver);
+    assert_eq!(
+        app.voltage.as_ref().unwrap().adapter,
+        VoltageAdapter::J2534(driver.clone())
+    );
     app.connect();
     assert!(app.status.contains(&driver.name));
     app.select_driver(None);
@@ -197,8 +200,8 @@ fn the_driver_picker_restores_the_preference_for_connection_and_voltage() {
     app.select_driver(None);
     assert!(app.driver_override.is_none());
     drop(app);
-    let app = Workbench::with_worker(root, |_, selected| {
-        assert!(selected.is_none());
+    let app = Workbench::with_worker(root, |_, settings| {
+        assert!(settings.preferred_driver.is_none());
         worker::spawn_with_driver(None, Vec::new)
     });
     assert!(app.driver_override.is_none());
@@ -224,6 +227,69 @@ fn saving_a_driver_preference_can_retry_after_a_write_failure() {
         Settings::load(&root).unwrap().preferred_driver,
         Some(driver)
     );
+}
+
+#[test]
+fn elm_adapter_setup_validates_saves_and_routes_header_connect() {
+    let root = temp("elm-adapter-setup");
+    let connection = ElmConnection::Serial {
+        port: "COM7".into(),
+        baud: None,
+    };
+    {
+        let mut app = Workbench::new(root.clone());
+        app.adapter_kind = AdapterKind::Serial;
+        app.connect();
+        assert!(!app.busy && app.page == Page::Connection);
+        assert!(
+            app.adapter_problem
+                .as_deref()
+                .unwrap()
+                .contains("serial port")
+        );
+        app.serial_port = "COM7".into();
+        app.serial_baud = "not a baud rate".into();
+        assert!(!app.apply_adapter_choice());
+        app.serial_baud.clear();
+        assert!(app.apply_adapter_choice());
+        assert_eq!(app.elm_connection.as_ref(), Some(&connection));
+    }
+    let mut app = Workbench::with_worker(root.clone(), |_, settings| {
+        assert_eq!(settings.elm_connection.as_ref(), Some(&connection));
+        worker::spawn_with_driver(None, Vec::new)
+    });
+    assert_eq!(app.adapter_kind, AdapterKind::Serial);
+    assert_eq!(app.serial_port, "COM7");
+    app.serial_ports = Some(vec!["COM7".into()]);
+    app.page = Page::Connection;
+    let output = render_context().run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 640.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| app.draw(ctx),
+    );
+    assert!(output.shapes.iter().any(|shape| {
+        matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == "COM / serial port")
+    }));
+    app.connect();
+    assert!(app.busy && app.status.contains("COM7"));
+    app.cancel_operation();
+    app.adapter_kind = AdapterKind::Tcp;
+    app.tcp_address = "tcp://adapter".into();
+    assert!(!app.apply_adapter_choice());
+    app.tcp_address = "[::1]:35000".into();
+    assert!(app.apply_adapter_choice());
+    assert_eq!(
+        Settings::load(&root).unwrap().elm_connection,
+        Some(ElmConnection::Tcp("[::1]:35000".into()))
+    );
+    app.adapter_kind = AdapterKind::J2534;
+    assert!(app.apply_adapter_choice());
+    assert!(Settings::load(&root).unwrap().elm_connection.is_none());
 }
 
 #[test]
@@ -2233,10 +2299,10 @@ fn header_vin_highlights_on_hover_copies_and_resets_between_connections() {
     app.tick();
     assert!(app.connected && app.vin_request.is_none());
     app.voltage = Some(VoltageSample {
-        driver: crate::j2534::DriverInfo {
+        adapter: VoltageAdapter::J2534(DriverInfo {
             name: "Mongoose-Plus MFC3".into(),
             path: PathBuf::new(),
-        },
+        }),
         millivolts: 12600,
         sampled_at: Instant::now(),
     });
@@ -2642,10 +2708,10 @@ fn every_new_page_renders_in_compact_and_large_windows() {
     app.dispatch(vec![app.base_query(4, None)], None, ReadMode::Control);
     pump(&mut app);
     app.voltage = Some(VoltageSample {
-        driver: crate::j2534::DriverInfo {
+        adapter: VoltageAdapter::J2534(DriverInfo {
             name: "Mongoose-Plus MFC3".into(),
             path: PathBuf::new(),
-        },
+        }),
         millivolts: 12600,
         sampled_at: Instant::now(),
     });

@@ -6,7 +6,7 @@ use obd_dashboard::scanner::{
     model::{Results, Sample},
     worker::{
         AttemptOutcome, Command, CommandSender, ConnectionAttempt, Event, ReadMode,
-        ReplyCheckOutcome, spawn_with_driver, spawn_with_driver_state,
+        ReplyCheckOutcome, VoltageAdapter, spawn_with_driver, spawn_with_driver_state,
     },
 };
 use std::path::{Path, PathBuf};
@@ -818,7 +818,7 @@ fn waiting_between_kline_attempts_keeps_voltage_live_and_can_be_cancelled() {
         matches!(event, Event::Voltage(Some(_)))
     });
     assert!(
-        matches!(reading, Event::Voltage(Some(sample)) if sample.driver.path == dll && sample.millivolts == 12600)
+        matches!(reading, Event::Voltage(Some(sample)) if matches!(&sample.adapter, VoltageAdapter::J2534(driver) if driver.path == dll) && sample.millivolts == 12600)
     );
     cancel.store(true, Ordering::Relaxed);
     let event = until(&rx, Duration::from_secs(3), |event| {
@@ -1808,7 +1808,7 @@ fn selected_j2534_driver_supplies_voltage_and_connections() {
     until(
         &rx,
         Duration::from_secs(8),
-        |event| matches!(event, Event::Voltage(Some(sample)) if sample.driver.path == other && sample.millivolts == 12600),
+        |event| matches!(event, Event::Voltage(Some(sample)) if matches!(&sample.adapter, VoltageAdapter::J2534(driver) if driver.path == other) && sample.millivolts == 12600),
     );
     assert_eq!(marks(&mongoose, "open"), 0);
     assert_eq!(marks(&other, "channel"), 0);
@@ -1911,7 +1911,9 @@ fn passive_voltage_tries_other_drivers_and_keeps_sampling_during_practice() {
         Duration::from_secs(8),
         |event| matches!(event, Event::Voltage(Some(sample)) if sample.millivolts == 0),
     );
-    assert!(matches!(zero, Event::Voltage(Some(sample)) if sample.driver.path == unpowered));
+    assert!(
+        matches!(zero, Event::Voltage(Some(sample)) if matches!(&sample.adapter, VoltageAdapter::J2534(driver) if driver.path == unpowered))
+    );
 
     entries
         .lock()
@@ -1922,7 +1924,9 @@ fn passive_voltage_tries_other_drivers_and_keeps_sampling_during_practice() {
         Duration::from_secs(8),
         |event| matches!(event, Event::Voltage(Some(sample)) if sample.millivolts == 12600),
     );
-    assert!(matches!(positive, Event::Voltage(Some(sample)) if sample.driver.path == powered));
+    assert!(
+        matches!(positive, Event::Voltage(Some(sample)) if matches!(&sample.adapter, VoltageAdapter::J2534(driver) if driver.path == powered))
+    );
     let other_opens = [marks(&unreadable, "open"), marks(&unpowered, "open")];
 
     send(&tx, Command::Demo { id: 1 });
@@ -1939,7 +1943,7 @@ fn passive_voltage_tries_other_drivers_and_keeps_sampling_during_practice() {
     until(
         &rx,
         Duration::from_secs(6),
-        |event| matches!(event, Event::Voltage(Some(sample)) if sample.driver.path == powered && sample.millivolts == 12600),
+        |event| matches!(event, Event::Voltage(Some(sample)) if matches!(&sample.adapter, VoltageAdapter::J2534(driver) if driver.path == powered) && sample.millivolts == 12600),
     );
     assert_eq!(
         [marks(&unreadable, "open"), marks(&unpowered, "open")],
@@ -1963,7 +1967,7 @@ fn passive_voltage_tries_other_drivers_and_keeps_sampling_during_practice() {
         matches!(event, Event::Voltage(Some(_)))
     });
     assert!(
-        matches!(measurement, Event::Voltage(Some(sample)) if sample.driver.path == unpowered && sample.millivolts == 0)
+        matches!(measurement, Event::Voltage(Some(sample)) if matches!(&sample.adapter, VoltageAdapter::J2534(driver) if driver.path == unpowered) && sample.millivolts == 0)
     );
     assert_eq!(marks(&powered, "open"), powered_opens);
 }

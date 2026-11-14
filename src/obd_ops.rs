@@ -34,45 +34,7 @@ where
     A: ElmAdapter,
     F: Fn(&str),
 {
-    // Reset — ignore errors; the device may not respond immediately.
-    let _ = elm.send("ATZ", 2000).await;
-    elm.sleep_ms(500).await;
-
-    for command in ["ATE0", "ATL0", "ATS0", "ATH0"] {
-        let lines = elm.send(command, 2000).await?;
-        if !lines.iter().any(|line| line.trim() == "OK") {
-            return Err(Elm327Error::InitFailed(format!(
-                "{command} rejected: {}",
-                lines.join(" | ")
-            )));
-        }
-    }
-
-    match mode {
-        crate::elm327::ElmCanMode::Auto => {
-            require_elm_ok(elm, "ATSP0").await?;
-        }
-        crate::elm327::ElmCanMode::CorsaDMediumSpeed => {
-            // ELM327 PP 2C=0x91 selects 11-bit ISO-TP with the 8/7 bitrate
-            // multiplier; PP 2D=0x06 gives (500/6)*(8/7) ~= 95.2 kbit/s.
-            // AT PB applies temporary parameters and is supported only by
-            // genuine/compatible ELM implementations. Never fall back to HS.
-            require_elm_ok(elm, "AT PB 91 06").await?;
-            require_elm_ok(elm, "ATSPB").await?;
-        }
-    }
-
-    // Branded compatible adapters need not report the literal ELM327 name.
-    if let Ok(lines) = elm.send("ATI", 1000).await {
-        if let Some(version) = lines.iter().find(|line| {
-            let upper = line.to_ascii_uppercase();
-            ["ELM", "OBDLINK", "STN", "ELS", "VLINKER"]
-                .iter()
-                .any(|name| upper.contains(name))
-        }) {
-            elm.info_mut().elm_version = version.clone();
-        }
-    }
+    configure_elm(elm, mode, false).await?;
 
     status("Detecting OBD protocol...");
     let has_obd_pid_response = match request_hex(elm, "0100", 8000).await {
@@ -123,6 +85,44 @@ where
         elm.info_mut().voltage = lines.into_iter().next();
     }
 
+    Ok(())
+}
+
+pub(crate) async fn configure_elm(
+    elm: &mut impl ElmAdapter,
+    mode: crate::elm327::ElmCanMode,
+    headers: bool,
+) -> Result<(), Elm327Error> {
+    // Reset — ignore errors; the device may not respond immediately.
+    let _ = elm.send("ATZ", 2000).await;
+    elm.sleep_ms(500).await;
+    for command in [
+        "ATE0",
+        "ATL0",
+        "ATS0",
+        if headers { "ATH1" } else { "ATH0" },
+    ] {
+        require_elm_ok(elm, command).await?;
+    }
+    match mode {
+        crate::elm327::ElmCanMode::Auto => require_elm_ok(elm, "ATSP0").await?,
+        crate::elm327::ElmCanMode::CorsaDMediumSpeed => {
+            // User Protocol B uses 11-bit ISO-TP and (500/6)*(8/7) kbit/s.
+            require_elm_ok(elm, "AT PB 91 06").await?;
+            require_elm_ok(elm, "ATSPB").await?;
+        }
+    }
+    // Compatible adapters can report their own firmware name.
+    if let Ok(lines) = elm.send("ATI", 1000).await
+        && let Some(version) = lines.iter().find(|line| {
+            let upper = line.to_ascii_uppercase();
+            ["ELM", "OBDLINK", "STN", "ELS", "VLINKER"]
+                .iter()
+                .any(|name| upper.contains(name))
+        })
+    {
+        elm.info_mut().elm_version = version.clone();
+    }
     Ok(())
 }
 

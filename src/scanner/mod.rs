@@ -3,6 +3,7 @@ mod appearance;
 mod codes;
 #[doc(hidden)]
 pub mod driver;
+mod elm;
 mod emissions_scan;
 mod freeze_frames;
 mod graphs;
@@ -26,6 +27,7 @@ use crate::adapter::{decode_hex, encode_hex};
 use crate::diagnostics::{self, PidSupport, Query, Reading, Update};
 use crate::j2534::{CanProtocol, DriverInfo, discover_drivers, same_driver_path};
 pub use appearance::icon_data as workbench_icon;
+use elm::AdapterKind;
 use model::*;
 use readiness::Period as ReadinessPeriod;
 use std::collections::{BTreeSet, VecDeque};
@@ -38,7 +40,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use worker::{
     AttemptOutcome, Command, CommandSender, ConnectionAttempt, Event, ReadMode, ReplyCheck,
-    VehicleReply, VoltageSample,
+    VehicleReply, VoltageAdapter, VoltageSample,
 };
 
 pub const VERSION: &str = env!("SCANNER_WORKBENCH_VERSION");
@@ -186,6 +188,13 @@ pub struct Workbench {
     driver_override: Option<DriverInfo>,
     driver_save_error: Option<String>,
     installed_drivers: Option<Vec<DriverInfo>>,
+    elm_connection: Option<ElmConnection>,
+    adapter_kind: AdapterKind,
+    serial_port: String,
+    serial_baud: String,
+    serial_ports: Option<Vec<String>>,
+    tcp_address: String,
+    adapter_problem: Option<String>,
     protocol_override: Option<CanProtocol>,
     ecu_source: Option<u8>,
     vehicle: Vehicle,
@@ -291,9 +300,22 @@ impl Workbench {
         Self::with_worker(root, |_, _| worker::spawn_with_driver(None, Vec::new))
     }
 
-    /// The executable supplied here handles the private --j2534-worker entry point.
+    /// The executable supplied here handles the private adapter-worker entry point.
     pub fn with_native_driver(root: PathBuf, executable: Option<PathBuf>) -> Self {
-        let app = Self::with_worker(root, |root, driver| worker::spawn(executable, root, driver));
+        let app = Self::with_worker(root, |root, settings| {
+            worker::spawn(
+                executable,
+                root,
+                settings
+                    .preferred_driver
+                    .as_ref()
+                    .map(|driver| driver.path.clone()),
+                settings
+                    .elm_connection
+                    .clone()
+                    .filter(|connection| connection.validate().is_ok()),
+            )
+        });
         #[cfg(windows)]
         let app = {
             let mut app = app;
@@ -313,7 +335,7 @@ impl Workbench {
 
     fn with_worker(
         root: PathBuf,
-        start_worker: impl FnOnce(&Path, Option<PathBuf>) -> (CommandSender, mpsc::Receiver<Event>),
+        start_worker: impl FnOnce(&Path, &Settings) -> (CommandSender, mpsc::Receiver<Event>),
     ) -> Self {
         let (settings, notice) = match Settings::load(&root) {
             Ok(s) => (s, String::new()),
@@ -323,10 +345,27 @@ impl Workbench {
             ),
         };
         let driver_override = settings.preferred_driver.clone();
-        let (tx, rx) = start_worker(
-            &root,
-            driver_override.as_ref().map(|driver| driver.path.clone()),
-        );
+        let (tx, rx) = start_worker(&root, &settings);
+        let elm_connection = settings
+            .elm_connection
+            .clone()
+            .filter(|connection| connection.validate().is_ok());
+        let adapter_kind = elm_connection
+            .as_ref()
+            .map_or(AdapterKind::J2534, ElmConnection::kind);
+        let mut serial_port = String::new();
+        let mut serial_baud = String::new();
+        let mut tcp_address = String::new();
+        match &settings.elm_connection {
+            Some(ElmConnection::Serial { port, baud }) => {
+                serial_port = port.clone();
+                if let Some(baud) = baud {
+                    serial_baud = baud.to_string();
+                }
+            }
+            Some(ElmConnection::Tcp(address)) => tcp_address = address.clone(),
+            None => {}
+        }
         let draft = settings.last_vehicle.clone().unwrap_or_default();
         let db = crate::dtc_database::find_database_path()
             .map(|p| crate::dtc_database::DtcDatabase::load(&p))
@@ -345,6 +384,13 @@ impl Workbench {
             driver_override,
             driver_save_error: None,
             installed_drivers: None,
+            elm_connection,
+            adapter_kind,
+            serial_port,
+            serial_baud,
+            serial_ports: None,
+            tcp_address,
+            adapter_problem: None,
             protocol_override: None,
             ecu_source: None,
             draft,
@@ -609,6 +655,64 @@ impl Workbench {
         };
     }
 
+    fn apply_adapter_choice(&mut self) -> bool {
+        let connection = match self.elm_connection_draft() {
+            Ok(connection) => connection,
+            Err(error) => {
+                self.adapter_problem = Some(error.into());
+                self.status = error.into();
+                return false;
+            }
+        };
+        if connection == self.elm_connection && connection == self.settings.elm_connection {
+            self.adapter_problem = None;
+            return true;
+        }
+        if self.elm_connection != connection {
+            if let Err(error) = self.tx.try_send(Command::SelectElm(connection.clone())) {
+                self.adapter_problem = Some(format!("Could not change adapters. {error}"));
+                return false;
+            }
+            self.voltage = None;
+            self.connection_attempts.clear();
+            self.connection_error = None;
+            self.elm_connection = connection.clone();
+        }
+        self.adapter_problem = self
+            .edit_settings(|settings| settings.elm_connection = connection)
+            .err()
+            .map(|error| {
+                format!("Adapter choice is active for this session. Could not save it. {error}")
+            });
+        self.status = self
+            .adapter_problem
+            .clone()
+            .unwrap_or_else(|| "Adapter choice saved.".into());
+        true
+    }
+
+    fn elm_connection_draft(&self) -> Result<Option<ElmConnection>, &'static str> {
+        let connection = match self.adapter_kind {
+            AdapterKind::J2534 => return Ok(None),
+            AdapterKind::Serial => {
+                let baud = self.serial_baud.trim();
+                let baud = (!baud.is_empty())
+                    .then(|| baud.parse::<u32>())
+                    .transpose()
+                    .map_err(
+                        |_| "Enter a baud rate or leave the field blank for automatic detection.",
+                    )?;
+                ElmConnection::Serial {
+                    port: self.serial_port.trim().into(),
+                    baud,
+                }
+            }
+            AdapterKind::Tcp => ElmConnection::Tcp(self.tcp_address.trim().into()),
+        };
+        connection.validate()?;
+        Ok(Some(connection))
+    }
+
     fn connect(&mut self) {
         if self.busy || self.connected && !self.demo {
             return;
@@ -616,6 +720,10 @@ impl Workbench {
         self.finish_recording();
         if self.unsaved.is_some() {
             self.status = "Save the pending recording before changing connection.".into();
+            return;
+        }
+        if !self.apply_adapter_choice() {
+            self.page = Page::Connection;
             return;
         }
         self.cancel_operation();
@@ -630,18 +738,28 @@ impl Workbench {
         self.connection_attempts.clear();
         self.connection_error = None;
         self.adapter_connect = Some(self.epoch);
-        self.status = self.driver_override.as_ref().map_or_else(
-            || "Finding the active J2534 adapter…".into(),
-            |driver| format!("Connecting through {}…", driver.name),
-        );
-        if !self.send(Command::Connect {
-            id: self.epoch,
-            protocol: self.protocol_override,
-            ecu: self
-                .ecu_source
-                .filter(|_| self.protocol_override.is_none_or(CanProtocol::extended)),
-            cancel: self.cancel.clone(),
-        }) {
+        let command = if let Some(connection) = &self.elm_connection {
+            self.status = format!("Connecting through {}…", connection.label());
+            Command::ConnectElm {
+                id: self.epoch,
+                connection: connection.clone(),
+                cancel: self.cancel.clone(),
+            }
+        } else {
+            self.status = self.driver_override.as_ref().map_or_else(
+                || "Finding the active J2534 adapter…".into(),
+                |driver| format!("Connecting through {}…", driver.name),
+            );
+            Command::Connect {
+                id: self.epoch,
+                protocol: self.protocol_override,
+                ecu: self
+                    .ecu_source
+                    .filter(|_| self.protocol_override.is_none_or(CanProtocol::extended)),
+                cancel: self.cancel.clone(),
+            }
+        };
+        if !self.send(command) {
             self.adapter_connect = None;
             self.connection_error = Some(self.status.clone());
         }
@@ -1198,11 +1316,17 @@ impl Workbench {
                     self.log(self.status.clone());
                 }
                 Event::Voltage(value) => {
-                    if let Some(selected) = &self.driver_override
-                        && value.as_ref().is_some_and(|sample| {
-                            !same_driver_path(&sample.driver.path, &selected.path)
-                        })
-                    {
+                    if value.as_ref().is_some_and(|sample| match &sample.adapter {
+                        VoltageAdapter::J2534(driver) => {
+                            self.elm_connection.is_some()
+                                || self.driver_override.as_ref().is_some_and(|selected| {
+                                    !same_driver_path(&driver.path, &selected.path)
+                                })
+                        }
+                        VoltageAdapter::Elm(connection) => {
+                            self.elm_connection.as_ref() != Some(connection)
+                        }
+                    }) {
                         continue;
                     }
                     self.voltage = value;
@@ -1798,6 +1922,7 @@ impl Workbench {
                     self.driver_override
                         .as_ref()
                         .map(|driver| driver.path.clone()),
+                    self.elm_connection.clone(),
                 );
                 if let Some(updates) = &mut self.updates {
                     updates.fail(format!("Could not restart to update. {err}"));

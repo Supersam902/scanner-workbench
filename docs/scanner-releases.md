@@ -1,6 +1,6 @@
 # Scanner Workbench releases on GitHub
 
-Scanner Workbench releases are hosted at [Supersam902/scanner-workbench](https://github.com/Supersam902/scanner-workbench/releases). The Windows x86 build loads 32-bit J2534 04.04 vendor drivers. The separate OBD-II Dashboard release workflow builds the classic app for several platforms.
+Scanner Workbench releases are hosted at [Supersam902/scanner-workbench](https://github.com/Supersam902/scanner-workbench/releases). The Windows x86 build loads 32-bit J2534 04.04 vendor drivers and supports ELM-compatible serial and TCP connections. The separate OBD-II Dashboard release workflow builds the classic app for several platforms.
 
 ## Package from the checkout
 

@@ -151,7 +151,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 #[cfg(not(target_arch = "wasm32"))]
-const COMMON_BAUDS: &[u32] = &[38400, 9600, 115200, 57600, 19200, 230400, 500000];
+pub(crate) const COMMON_BAUDS: &[u32] = &[38400, 9600, 115200, 57600, 19200, 230400, 500000];
 
 #[cfg(not(target_arch = "wasm32"))]
 const PORT_PATTERNS: &[&str] = &[
@@ -299,26 +299,7 @@ fn try_port_baud_mode(
     mode: ElmCanMode,
     report: &dyn Fn(&str),
 ) -> Result<Elm327, Elm327Error> {
-    let port = serialport::new(port_name, baud)
-        .timeout(Duration::from_secs(3))
-        .data_bits(serialport::DataBits::Eight)
-        .parity(serialport::Parity::None)
-        .stop_bits(serialport::StopBits::One)
-        .flow_control(serialport::FlowControl::None)
-        .open()
-        .map_err(|e| Elm327Error::Serial(format!("{port_name}: {e}")))?;
-
-    let _ = port.clear(serialport::ClearBuffer::All);
-    let mut adapter = Elm327 {
-        port,
-        info: ConnectionInfo {
-            port: port_name.to_string(),
-            baud,
-            protocol: String::new(),
-            elm_version: String::new(),
-            voltage: None,
-        },
-    };
+    let mut adapter = Elm327::open(port_name, baud)?;
     block_on(crate::obd_ops::init_elm_with_mode(
         &mut adapter,
         report,
@@ -328,11 +309,39 @@ fn try_port_baud_mode(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+impl Elm327 {
+    pub(crate) fn open(port_name: &str, baud: u32) -> Result<Self, Elm327Error> {
+        let port = serialport::new(port_name, baud)
+            .timeout(Duration::from_millis(100))
+            .data_bits(serialport::DataBits::Eight)
+            .parity(serialport::Parity::None)
+            .stop_bits(serialport::StopBits::One)
+            .flow_control(serialport::FlowControl::None)
+            .open()
+            .map_err(|e| Elm327Error::Serial(format!("{port_name}: {e}")))?;
+        let _ = port.clear(serialport::ClearBuffer::All);
+        Ok(Self {
+            port,
+            info: ConnectionInfo {
+                port: port_name.to_owned(),
+                baud,
+                protocol: String::new(),
+                elm_version: String::new(),
+                voltage: None,
+            },
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl ElmAdapter for Elm327 {
     async fn send(&mut self, cmd: &str, timeout_ms: u64) -> Result<Vec<String>, Elm327Error> {
         debug!(cmd, "TX");
         write_cmd(&mut self.port, cmd)?;
-        let lines = read_response(&mut self.port, Duration::from_millis(timeout_ms))?;
+        let lines = read_response(&mut self.port, Duration::from_millis(timeout_ms))?
+            .into_iter()
+            .filter(|line| !line.eq_ignore_ascii_case(cmd))
+            .collect();
         debug!(cmd, response = ?lines, "RX");
         Ok(lines)
     }
@@ -370,43 +379,43 @@ fn read_response(
     let mut tmp = [0u8; 256];
 
     loop {
-        if start.elapsed() > timeout {
-            // Return what we have if anything
-            if !buf.is_empty() {
-                break;
-            }
+        if start.elapsed() >= timeout {
             return Err(Elm327Error::Timeout(format!(
-                "No response within {}ms",
+                "No complete serial response within {}ms",
                 timeout.as_millis()
             )));
         }
 
         match port.read(&mut tmp) {
             Ok(n) => {
-                buf.extend_from_slice(&tmp[..n]);
-                // Check for prompt character '>'
-                if buf.contains(&b'>') {
+                let chunk = &tmp[..n];
+                let prompt = chunk.iter().position(|&byte| byte == b'>');
+                buf.extend_from_slice(&chunk[..prompt.unwrap_or(n)]);
+                if buf.len() > 65_536 {
+                    return Err(Elm327Error::Serial("Serial response exceeds 64 KiB".into()));
+                }
+                if prompt.is_some() {
                     break;
                 }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                // Keep waiting
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
+                ) =>
+            {
                 continue;
             }
-            Err(e) => {
-                if !buf.is_empty() {
-                    break;
-                }
-                return Err(Elm327Error::Serial(e.to_string()));
-            }
+            Err(e) => return Err(Elm327Error::Serial(e.to_string())),
         }
     }
 
     let raw = String::from_utf8_lossy(&buf);
     let lines: Vec<String> = raw
-        .split('\r')
-        .map(|s| s.replace(['\n', '>'], "").trim().to_string())
+        .split(['\r', '\n'])
+        .map(str::trim)
         .filter(|s| !s.is_empty())
+        .map(str::to_owned)
         .collect();
 
     Ok(lines)

@@ -1,5 +1,6 @@
 use super::codes;
 use super::driver::{DriverProcess, Request, Value};
+use super::elm::{ElmConnection, ElmEndpoint};
 use super::live_reads;
 use super::model::{ecu_label, load_json, save_json, unavailable};
 use crate::adapter::{DiagnosticAdapter, DiagnosticResponse, DiagnosticTarget, encode_hex};
@@ -48,6 +49,12 @@ pub enum Command {
         cancel: Arc<AtomicBool>,
     },
     SelectDriver(Option<PathBuf>),
+    SelectElm(Option<ElmConnection>),
+    ConnectElm {
+        id: u64,
+        connection: ElmConnection,
+        cancel: Arc<AtomicBool>,
+    },
     Demo {
         id: u64,
     },
@@ -315,15 +322,30 @@ impl ReplyCheck {
 }
 
 pub struct VoltageSample {
-    pub driver: DriverInfo,
+    pub adapter: VoltageAdapter,
     pub millivolts: u32,
     pub sampled_at: Instant,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VoltageAdapter {
+    J2534(DriverInfo),
+    Elm(ElmConnection),
+}
+
+impl VoltageAdapter {
+    pub(super) fn label(&self) -> String {
+        match self {
+            Self::J2534(driver) => driver.name.clone(),
+            Self::Elm(connection) => connection.label(),
+        }
+    }
+}
+
 impl VoltageSample {
-    fn new(driver: DriverInfo, millivolts: u32) -> Self {
+    fn new(adapter: VoltageAdapter, millivolts: u32) -> Self {
         Self {
-            driver,
+            adapter,
             millivolts,
             sampled_at: Instant::now(),
         }
@@ -366,6 +388,52 @@ struct DriverRuntime {
     shutdown: Arc<AtomicBool>,
 }
 
+struct VehicleSession {
+    pid_scan: SupportScan,
+    monitor_scan: SupportScan,
+    oxygen: OxygenSession,
+    info_scan: SupportScan,
+    scan_responders: ScanResponders,
+    grouping_allowed: bool,
+}
+
+impl Default for VehicleSession {
+    fn default() -> Self {
+        Self {
+            pid_scan: SupportScan::new(1, 0),
+            monitor_scan: SupportScan::new(6, 0),
+            oxygen: OxygenSession::default(),
+            info_scan: SupportScan::new(9, 0),
+            scan_responders: ScanResponders::new(),
+            grouping_allowed: true,
+        }
+    }
+}
+
+impl VehicleSession {
+    fn connected(
+        &mut self,
+        mut physical: PhysicalLink,
+        replies: Vec<DiagnosticResponse>,
+        tx: &mpsc::Sender<Event>,
+    ) -> Link {
+        *self = Self::default();
+        self.pid_scan.accept(Ok(replies));
+        physical
+            .expected_pids
+            .extend(self.pid_scan.support.reported.iter().copied());
+        let _ = tx.send(Event::Connected {
+            id: physical.id,
+            driver: Some(physical.info.port.clone()),
+            protocol: physical.info.protocol.clone(),
+            demo: false,
+            pid_support: self.pid_scan.support.clone(),
+        });
+        let _ = tx.send(Event::VehicleReply(physical.id, physical.vehicle_reply));
+        Link::Physical(Box::new(physical))
+    }
+}
+
 impl DriverRuntime {
     fn launch(&self) -> Result<DriverProcess, String> {
         let exe = self
@@ -373,7 +441,7 @@ impl DriverRuntime {
             .as_deref()
             .ok_or("Scanner executable is unavailable")?;
         DriverProcess::start(exe, self.shutdown.clone())
-            .map_err(|e| format!("Cannot start the isolated J2534 driver process: {e}"))
+            .map_err(|e| format!("Cannot start the adapter process: {e}"))
     }
 }
 
@@ -381,11 +449,13 @@ pub(super) fn spawn(
     executable: Option<PathBuf>,
     data_dir: &Path,
     selected_driver: Option<PathBuf>,
+    selected_elm: Option<ElmConnection>,
 ) -> (CommandSender, mpsc::Receiver<Event>) {
-    spawn_with_driver_state(
+    spawn_worker(
         executable,
         Some(data_dir.to_owned()),
         selected_driver,
+        selected_elm,
         discover_drivers,
     )
 }
@@ -405,6 +475,16 @@ pub fn spawn_with_driver_state(
     selected_driver: Option<PathBuf>,
     discover: impl Fn() -> Vec<DriverInfo> + Send + 'static,
 ) -> (CommandSender, mpsc::Receiver<Event>) {
+    spawn_worker(executable, data_dir, selected_driver, None, discover)
+}
+
+fn spawn_worker(
+    executable: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+    selected_driver: Option<PathBuf>,
+    selected_elm: Option<ElmConnection>,
+    discover: impl Fn() -> Vec<DriverInfo> + Send + 'static,
+) -> (CommandSender, mpsc::Receiver<Event>) {
     let (sender, rx) = mpsc::sync_channel(8);
     let (events, out) = mpsc::channel();
     let activity = Arc::new(AtomicUsize::new(0));
@@ -415,7 +495,9 @@ pub fn spawn_with_driver_state(
         activity: activity.clone(),
         shutdown: shutdown.clone(),
     };
-    let _thread = std::thread::spawn(move || run(rx, events, discover, runtime, selected_driver));
+    let _thread = std::thread::spawn(move || {
+        run(rx, events, discover, runtime, selected_driver, selected_elm)
+    });
     let tx = CommandSender {
         sender,
         activity,
@@ -440,7 +522,7 @@ fn close_link(link: &mut Option<Link>, kline_retry_at: &mut Instant) {
 
 struct PhysicalLink {
     driver: DriverProcess,
-    driver_info: DriverInfo,
+    adapter: VoltageAdapter,
     info: ConnectionInfo,
     protocol: CanProtocol,
     id: u64,
@@ -479,7 +561,7 @@ impl PhysicalLink {
             let value = self
                 .read_millivolts()
                 .ok()
-                .map(|millivolts| VoltageSample::new(self.driver_info.clone(), millivolts));
+                .map(|millivolts| VoltageSample::new(self.adapter.clone(), millivolts));
             self.next_voltage = Instant::now() + VOLTAGE_INTERVAL;
             let _ = self.events.send(Event::Voltage(value));
         }
@@ -776,9 +858,10 @@ fn connect_vehicle(
         let mut sample_voltage = |process: &mut DriverProcess| {
             if Instant::now() >= voltage_at {
                 let value = match process.call(Request::Voltage, cancelled) {
-                    Ok(Value::Voltage(millivolts)) => {
-                        Some(VoltageSample::new(driver.clone(), millivolts))
-                    }
+                    Ok(Value::Voltage(millivolts)) => Some(VoltageSample::new(
+                        VoltageAdapter::J2534(driver.clone()),
+                        millivolts,
+                    )),
                     Ok(_) => unreachable!("the driver response type was checked"),
                     Err(_) => None,
                 };
@@ -872,7 +955,7 @@ fn connect_vehicle(
                     return Ok((
                         PhysicalLink {
                             driver: process,
-                            driver_info: driver,
+                            adapter: VoltageAdapter::J2534(driver),
                             info,
                             protocol,
                             id,
@@ -959,7 +1042,7 @@ fn sample_idle_voltage(
             .and_then(|_| process.call(Request::Voltage, &interrupted));
         match result {
             Ok(Value::Voltage(millivolts)) => {
-                let sample = VoltageSample::new(driver, millivolts);
+                let sample = VoltageSample::new(VoltageAdapter::J2534(driver), millivolts);
                 if millivolts != 0 {
                     return Ok(Some(sample));
                 }
@@ -976,6 +1059,155 @@ fn sample_idle_voltage(
     } else {
         driver_failure.map_or(Ok(None), Err)
     }
+}
+
+#[allow(clippy::too_many_arguments)] // The worker owns the adapter handle and its operation deadline.
+fn connect_elm(
+    id: u64,
+    connection: &ElmConnection,
+    last_baud: Option<u32>,
+    idle: Option<(DriverProcess, ElmEndpoint)>,
+    cancel: &AtomicBool,
+    tx: &mpsc::Sender<Event>,
+    runtime: &DriverRuntime,
+) -> Result<(PhysicalLink, Vec<DiagnosticResponse>, Option<u32>), String> {
+    let cancelled = || cancel.load(Ordering::Relaxed) || runtime.shutdown.load(Ordering::Relaxed);
+    let mut idle = idle;
+    let origin = VoltageAdapter::Elm(connection.clone());
+    let mut last_error = String::from("Could not open an ELM adapter");
+    for endpoint in connection.endpoints(last_baud) {
+        if cancelled() {
+            break;
+        }
+        let baud = endpoint.baud();
+        let name = baud.map_or_else(
+            || connection.label(),
+            |baud| format!("{} · {baud} baud", connection.label()),
+        );
+        let _ = tx.send(Event::ConnectProgress(id, format!("Checking {name}")));
+        let attempt = |protocol, outcome, detail| {
+            let _ = tx.send(Event::ConnectAttempt(
+                id,
+                ConnectionAttempt {
+                    driver: name.clone(),
+                    protocol,
+                    remembered_protocol: false,
+                    outcome,
+                    detail,
+                },
+            ));
+        };
+        let mut adapter = match idle.take() {
+            Some((adapter, open_endpoint)) if open_endpoint == endpoint => adapter,
+            _ => {
+                let mut adapter = runtime.launch()?;
+                match adapter.call(Request::OpenElm(endpoint), cancelled) {
+                    Ok(Value::Done) => adapter,
+                    Err(error) => {
+                        attempt(None, AttemptOutcome::OpenFailed, Some(error.clone()));
+                        last_error = error;
+                        // An unavailable port cannot be opened at any baud rate.
+                        break;
+                    }
+                    Ok(_) => unreachable!("the driver response type was checked"),
+                }
+            }
+        };
+        attempt(None, AttemptOutcome::Opened, None);
+        match adapter.call(Request::ProbeElm, cancelled) {
+            Ok(Value::ElmProbed {
+                protocol,
+                identity,
+                replies,
+            }) if !cancelled() => {
+                attempt(Some(protocol), AttemptOutcome::Verified, None);
+                let driver = if identity.is_empty() {
+                    name
+                } else {
+                    format!("{name} · {identity}")
+                };
+                let link = PhysicalLink {
+                    driver: adapter,
+                    adapter: origin,
+                    info: ConnectionInfo {
+                        port: driver,
+                        baud: baud.unwrap_or(0),
+                        protocol: protocol.label().into(),
+                        elm_version: identity,
+                        voltage: None,
+                    },
+                    protocol,
+                    id,
+                    next_voltage: Instant::now(),
+                    vehicle_reply: VehicleReply {
+                        last_reply: Instant::now(),
+                        missed: false,
+                    },
+                    expected_read_misses: 0,
+                    expected_pids: BTreeSet::new(),
+                    cancel: None,
+                    events: tx.clone(),
+                };
+                return Ok((link, replies, baud));
+            }
+            _ if cancelled() => {
+                attempt(None, AttemptOutcome::Cancelled, None);
+                break;
+            }
+            Err(error) => {
+                attempt(
+                    None,
+                    AttemptOutcome::ProbeFailed(ProbePhase::Reply),
+                    Some(error.clone()),
+                );
+                last_error = error;
+            }
+            Ok(_) => unreachable!("the driver response type was checked"),
+        }
+    }
+    if cancelled() {
+        Err("Connection cancelled.".into())
+    } else {
+        Err(format!(
+            "{} did not connect. {last_error}",
+            connection.label()
+        ))
+    }
+}
+
+fn sample_idle_elm(
+    runtime: &DriverRuntime,
+    connection: &ElmConnection,
+    idle: &mut Option<(DriverProcess, ElmEndpoint)>,
+    last_baud: &mut Option<u32>,
+    interrupted: impl Fn() -> bool,
+) -> Result<Option<VoltageSample>, String> {
+    let origin = VoltageAdapter::Elm(connection.clone());
+    if let Some((adapter, _)) = idle {
+        match adapter.call(Request::Voltage, &interrupted) {
+            Ok(Value::Voltage(value)) => return Ok(Some(VoltageSample::new(origin, value))),
+            Err(_) => *idle = None,
+            Ok(_) => unreachable!("the driver response type was checked"),
+        }
+        return Ok(None);
+    }
+    for endpoint in connection.endpoints(*last_baud) {
+        if interrupted() {
+            return Ok(None);
+        }
+        let mut adapter = runtime.launch()?;
+        adapter.call(Request::OpenElm(endpoint.clone()), &interrupted)?;
+        match adapter.call(Request::Voltage, &interrupted) {
+            Ok(Value::Voltage(value)) => {
+                *last_baud = endpoint.baud();
+                *idle = Some((adapter, endpoint));
+                return Ok(Some(VoltageSample::new(origin, value)));
+            }
+            Err(_) => {}
+            Ok(_) => unreachable!("the driver response type was checked"),
+        }
+    }
+    Ok(None)
 }
 
 fn read_one(
@@ -1517,23 +1749,21 @@ fn run(
     discover: impl Fn() -> Vec<DriverInfo>,
     runtime: DriverRuntime,
     mut selected_driver: Option<PathBuf>,
+    mut selected_elm: Option<ElmConnection>,
 ) {
     let mut link: Option<Link> = None;
-    let mut pid_scan = SupportScan::new(1, 0);
-    let mut monitor_scan = SupportScan::new(6, 0);
-    let mut oxygen = OxygenSession::default();
-    let mut info_scan = SupportScan::new(9, 0);
-    let mut scan_responders = ScanResponders::new();
-    let mut grouping_allowed = true;
+    let mut vehicle = VehicleSession::default();
     let mut idle_voltage = Instant::now() + VOLTAGE_INTERVAL;
     let mut voltage_driver = None::<PathBuf>;
+    let mut elm_voltage = None::<(DriverProcess, ElmEndpoint)>;
+    let mut last_elm_baud = None;
     let mut kline_retry_at = Instant::now();
     let mut last_connection = None::<LastConnection>;
     while !runtime.shutdown.load(Ordering::Relaxed) {
         let activity = runtime.activity.load(Ordering::Relaxed);
         let received = match &link {
             // Only start an advertised continuation when the command queue is empty.
-            Some(Link::Physical(_)) if pid_scan.support.next_range.is_some() => {
+            Some(Link::Physical(_)) if vehicle.pid_scan.support.next_range.is_some() => {
                 rx.recv_timeout(Duration::ZERO)
             }
             Some(Link::Physical(physical)) => rx.recv_timeout(
@@ -1554,26 +1784,40 @@ fn run(
                         if let Link::Physical(physical) = adapter {
                             if Instant::now() >= physical.next_voltage {
                                 physical.refresh_voltage();
-                            } else if pid_scan.support.next_range.is_some() {
+                            } else if vehicle.pid_scan.support.next_range.is_some() {
                                 let id = physical.id;
-                                block_on(pid_scan.step(adapter, AUTOMATIC_PID_TIMEOUT_MS));
-                                adapter.include_reported_pids(&pid_scan.support);
-                                let _ =
-                                    tx.send(Event::LivePidSupport(id, pid_scan.support.clone()));
+                                block_on(vehicle.pid_scan.step(adapter, AUTOMATIC_PID_TIMEOUT_MS));
+                                adapter.include_reported_pids(&vehicle.pid_scan.support);
+                                let _ = tx.send(Event::LivePidSupport(
+                                    id,
+                                    vehicle.pid_scan.support.clone(),
+                                ));
                             }
                         }
                     }
                     Some(Link::Demo(_)) | None => {
                         // Prioritise an incoming Connect command over a stalled passive poll.
                         let interrupted = || runtime.activity.load(Ordering::Relaxed) != activity;
-                        let result = sample_idle_voltage(
-                            &runtime,
-                            &discover,
-                            selected_driver.as_deref(),
-                            voltage_driver.as_deref(),
-                            interrupted,
-                        );
-                        let delay = if result.is_err() {
+                        let result = if let Some(connection) = &selected_elm {
+                            sample_idle_elm(
+                                &runtime,
+                                connection,
+                                &mut elm_voltage,
+                                &mut last_elm_baud,
+                                interrupted,
+                            )
+                        } else {
+                            sample_idle_voltage(
+                                &runtime,
+                                &discover,
+                                selected_driver.as_deref(),
+                                voltage_driver.as_deref(),
+                                interrupted,
+                            )
+                        };
+                        let delay = if result.is_err()
+                            || selected_elm.is_some() && matches!(result, Ok(None))
+                        {
                             VOLTAGE_BACKOFF
                         } else {
                             VOLTAGE_INTERVAL
@@ -1581,8 +1825,12 @@ fn run(
                         idle_voltage = Instant::now() + delay;
                         if !interrupted() {
                             let value = result.ok().flatten();
-                            if let Some(sample) = &value {
-                                voltage_driver = Some(sample.driver.path.clone());
+                            if let Some(VoltageSample {
+                                adapter: VoltageAdapter::J2534(driver),
+                                ..
+                            }) = &value
+                            {
+                                voltage_driver = Some(driver.path.clone());
                             }
                             let _ = tx.send(Event::Voltage(value));
                         }
@@ -1606,6 +1854,15 @@ fn run(
                     let _ = tx.send(Event::Voltage(None));
                 }
             }
+            Command::SelectElm(connection) => {
+                if !matches!(link, Some(Link::Physical(_))) && selected_elm != connection {
+                    selected_elm = connection;
+                    elm_voltage = None;
+                    last_elm_baud = None;
+                    idle_voltage = Instant::now();
+                    let _ = tx.send(Event::Voltage(None));
+                }
+            }
             Command::Disconnect { id } => {
                 close_link(&mut link, &mut kline_retry_at);
                 idle_voltage = Instant::now() + VOLTAGE_INTERVAL;
@@ -1614,14 +1871,13 @@ fn run(
             Command::Demo { id } => {
                 close_link(&mut link, &mut kline_retry_at);
                 let mut adapter = Link::Demo(DemoAdapter::new());
-                pid_scan = SupportScan::new(1, 0);
-                scan_responders.clear();
-                monitor_scan = SupportScan::new(6, 0);
-                oxygen = OxygenSession::default();
-                info_scan = SupportScan::new(9, 0);
-                grouping_allowed = true;
-                while pid_scan.support.next_range.is_some() {
-                    block_on(pid_scan.step(&mut adapter, AUTOMATIC_PID_TIMEOUT_MS));
+                vehicle = VehicleSession::default();
+                while vehicle.pid_scan.support.next_range.is_some() {
+                    block_on(
+                        vehicle
+                            .pid_scan
+                            .step(&mut adapter, AUTOMATIC_PID_TIMEOUT_MS),
+                    );
                 }
                 link = Some(adapter);
                 let _ = tx.send(Event::Connected {
@@ -1629,7 +1885,7 @@ fn run(
                     driver: None,
                     protocol: "DEMO CAN 11-bit / 500 kbit/s".into(),
                     demo: true,
-                    pid_support: pid_scan.support.clone(),
+                    pid_support: vehicle.pid_scan.support.clone(),
                 });
             }
             Command::Connect {
@@ -1638,6 +1894,11 @@ fn run(
                 ecu,
                 cancel,
             } => {
+                if selected_elm.take().is_some() {
+                    last_elm_baud = None;
+                    let _ = tx.send(Event::Voltage(None));
+                }
+                elm_voltage = None;
                 close_link(&mut link, &mut kline_retry_at);
                 let saved = runtime
                     .connection_cache
@@ -1683,40 +1944,22 @@ fn run(
                     continue;
                 }
                 match result {
-                    Ok((mut physical, replies)) => {
+                    Ok((physical, replies)) => {
+                        let VoltageAdapter::J2534(driver) = &physical.adapter else {
+                            unreachable!("a J2534 connection opened a J2534 driver");
+                        };
                         let remember = ecu.is_none().then(|| LastConnection {
-                            driver: physical.driver_info.path.clone(),
+                            driver: driver.path.clone(),
                             protocol: physical.protocol,
                         });
-                        let protocol = physical.info.protocol.clone();
-                        let driver = physical.driver_info.name.clone();
                         if voltage_driver
                             .as_ref()
-                            .is_some_and(|path| path != &physical.driver_info.path)
+                            .is_some_and(|path| !same_driver_path(path, &driver.path))
                         {
                             let _ = tx.send(Event::Voltage(None));
                         }
-                        voltage_driver = Some(physical.driver_info.path.clone());
-                        pid_scan = SupportScan::new(1, 0);
-                        pid_scan.accept(Ok(replies));
-                        physical
-                            .expected_pids
-                            .extend(pid_scan.support.reported.iter().copied());
-                        let vehicle_reply = physical.vehicle_reply;
-                        scan_responders.clear();
-                        monitor_scan = SupportScan::new(6, 0);
-                        oxygen = OxygenSession::default();
-                        info_scan = SupportScan::new(9, 0);
-                        grouping_allowed = true;
-                        link = Some(Link::Physical(Box::new(physical)));
-                        let _ = tx.send(Event::Connected {
-                            id,
-                            driver: Some(driver),
-                            protocol,
-                            demo: false,
-                            pid_support: pid_scan.support.clone(),
-                        });
-                        let _ = tx.send(Event::VehicleReply(id, vehicle_reply));
+                        voltage_driver = Some(driver.path.clone());
+                        link = Some(vehicle.connected(physical, replies, &tx));
                         // Update the hint only after a newly verified session is accepted.
                         if let Some(remember) = remember {
                             if saved.as_ref() != Some(&remember) {
@@ -1740,6 +1983,46 @@ fn run(
                     }
                 }
             }
+            Command::ConnectElm {
+                id,
+                connection,
+                cancel,
+            } => {
+                close_link(&mut link, &mut kline_retry_at);
+                if selected_elm.as_ref() != Some(&connection) {
+                    elm_voltage = None;
+                    last_elm_baud = None;
+                    let _ = tx.send(Event::Voltage(None));
+                    selected_elm = Some(connection.clone());
+                }
+                let result = connect_elm(
+                    id,
+                    &connection,
+                    last_elm_baud,
+                    elm_voltage.take(),
+                    &cancel,
+                    &tx,
+                    &runtime,
+                );
+                idle_voltage = Instant::now() + VOLTAGE_INTERVAL;
+                if cancel.load(Ordering::Relaxed) {
+                    if let Ok((physical, _, _)) = result {
+                        link = Some(Link::Physical(Box::new(physical)));
+                        close_link(&mut link, &mut kline_retry_at);
+                    }
+                    let _ = tx.send(Event::Failed(id, "Connection cancelled.".into()));
+                    continue;
+                }
+                match result {
+                    Ok((physical, replies, baud)) => {
+                        last_elm_baud = baud;
+                        link = Some(vehicle.connected(physical, replies, &tx));
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Event::Failed(id, error));
+                    }
+                }
+            }
             Command::Read {
                 id,
                 mut queries,
@@ -1754,6 +2037,14 @@ fn run(
                     ));
                     continue;
                 };
+                let VehicleSession {
+                    pid_scan,
+                    monitor_scan,
+                    oxygen,
+                    info_scan,
+                    scan_responders,
+                    grouping_allowed,
+                } = &mut vehicle;
                 let identify = matches!(mode, ReadMode::Identify);
                 if identify && !matches!(adapter, Link::Physical(physical) if physical.id == id) {
                     continue;
@@ -1775,10 +2066,8 @@ fn run(
                     let query = vehicle_info_query(2, "VIN".into());
                     let mut rows = read_one(adapter, &query, id, false, &cancel, &tx);
                     if !cancel.load(Ordering::Relaxed) && adapter.failure().is_none() {
-                        if let Some(observed) =
-                            observe_scan_reply(&query, &rows, &mut scan_responders)
-                        {
-                            rows = complete_advertised_read(&query, rows, &info_scan, observed);
+                        if let Some(observed) = observe_scan_reply(&query, &rows, scan_responders) {
+                            rows = complete_advertised_read(&query, rows, info_scan, observed);
                         }
                         let _ = tx.send(Event::InitialVin(id, rows));
                     }
@@ -1810,7 +2099,7 @@ fn run(
                         block_on(refresh.step(adapter, 2000));
                     }
                     if !cancel.load(Ordering::Relaxed) {
-                        pid_scan = refresh;
+                        *pid_scan = refresh;
                         adapter.include_reported_pids(&pid_scan.support);
                         completion = if let Some(problem) = &pid_scan.support.problem {
                             format!("PID support check incomplete. {problem}")
@@ -1859,25 +2148,19 @@ fn run(
                         &cancel,
                         &tx,
                         false,
-                        &mut scan_responders,
+                        scan_responders,
                     );
                 } else if matches!(mode, ReadMode::MonitorSweep) {
-                    completion = read_monitors(
-                        adapter,
-                        id,
-                        &mut monitor_scan,
-                        &mut scan_responders,
-                        &cancel,
-                        &tx,
-                    );
+                    completion =
+                        read_monitors(adapter, id, monitor_scan, scan_responders, &cancel, &tx);
                 } else if matches!(mode, ReadMode::OxygenSweep | ReadMode::OxygenTest { .. }) {
-                    completion = oxygen.run(adapter, id, mode, &pid_scan, &cancel, &tx);
+                    completion = oxygen.run(adapter, id, mode, pid_scan, &cancel, &tx);
                 } else if matches!(mode, ReadMode::VehicleInformation) {
                     completion = read_vehicle_information(
                         adapter,
                         id,
-                        &mut info_scan,
-                        &mut scan_responders,
+                        info_scan,
+                        scan_responders,
                         &cancel,
                         &tx,
                     );
@@ -1894,13 +2177,13 @@ fn run(
                         && !cancel.load(Ordering::Relaxed)
                         && adapter.failure().is_none()
                     {
-                        let group = if can_group && grouping_allowed {
-                            live_reads::Group::new(&queries[index..], &pid_scan)
+                        let group = if can_group && *grouping_allowed {
+                            live_reads::Group::new(&queries[index..], pid_scan)
                         } else {
                             None
                         };
                         if let Some(mut group) = group {
-                            group.include_observed(&scan_responders);
+                            group.include_observed(scan_responders);
                             let label = format!("Live data ({} PIDs)", group.pids.len());
                             if !polling {
                                 let _ = tx.send(Event::Progress(id, index, total, label.clone()));
@@ -1913,7 +2196,7 @@ fn run(
                                 && !cancel.load(Ordering::Relaxed)
                                 && adapter.failure().is_none()
                             {
-                                grouping_allowed = false;
+                                *grouping_allowed = false;
                                 let _ = tx.send(Event::LiveGroupingFallback(id));
                             }
                             let group_at = Instant::now();
@@ -1926,7 +2209,7 @@ fn run(
                                 let sampled_at =
                                     single_rows.as_ref().map_or(group_at, |_| Instant::now());
                                 let rows = pid.into_rows(single_rows);
-                                let _ = observe_scan_reply(query, &rows, &mut scan_responders);
+                                let _ = observe_scan_reply(query, &rows, scan_responders);
                                 publish_read(&tx, id, rows, Some(sampled_at));
                                 index += 1;
                                 if !polling {
@@ -1946,17 +2229,17 @@ fn run(
                                 read_one(adapter, query, id, control, &cancel, &tx)
                             };
                             let sampled_at = live_grouping.is_some().then(Instant::now);
-                            let observed = observe_scan_reply(query, &rows, &mut scan_responders);
+                            let observed = observe_scan_reply(query, &rows, scan_responders);
                             if !cancel.load(Ordering::Relaxed) {
                                 match mode {
                                     ReadMode::Diagnostic
                                         if matches!(query.bytes.as_slice(), [6 | 9, _]) =>
                                     {
                                         if let Some(observed) = observed {
-                                            let support = if query.bytes[0] == 6 {
-                                                &monitor_scan
+                                            let support: &SupportScan = if query.bytes[0] == 6 {
+                                                monitor_scan
                                             } else {
-                                                &info_scan
+                                                info_scan
                                             };
                                             rows = complete_advertised_read(
                                                 query, rows, support, observed,
@@ -1966,7 +2249,7 @@ fn run(
                                     ReadMode::Live { .. } | ReadMode::Poll { .. } => {
                                         if let Some(observed) = observed {
                                             rows = complete_advertised_read(
-                                                query, rows, &pid_scan, observed,
+                                                query, rows, pid_scan, observed,
                                             );
                                         }
                                     }
@@ -1979,12 +2262,12 @@ fn run(
                                                             codes::confirmed_counts(&rows);
                                                     }
                                                     rows = complete_advertised_read(
-                                                        query, rows, &pid_scan, observed,
+                                                        query, rows, pid_scan, observed,
                                                     );
                                                 }
                                                 [9, _] => {
                                                     rows = complete_advertised_read(
-                                                        query, rows, &info_scan, observed,
+                                                        query, rows, info_scan, observed,
                                                     );
                                                 }
                                                 [3] if adapter.failure().is_none() => {
@@ -2034,7 +2317,7 @@ fn run(
                             &cancel,
                             &tx,
                             true,
-                            &mut scan_responders,
+                            scan_responders,
                         );
                         if !freeze.is_empty() {
                             let _ = tx.send(Event::Log(id, freeze));
