@@ -321,7 +321,12 @@ fn background_poll_keeps_toolbar_steady_and_yields_to_a_foreground_read() {
                 egui::Shape::Text(text)
                     if matches!(
                         text.galley.job.text.as_str(),
-                        "Stop live" | "Read once" | "Record" | "Graphs" | "Polling live data."
+                        "Stop live"
+                            | "Read once"
+                            | "Presets"
+                            | "Record"
+                            | "Graphs"
+                            | "Polling live data."
                     ) =>
                 {
                     Some((
@@ -335,7 +340,7 @@ fn background_poll_keeps_toolbar_steady_and_yields_to_a_foreground_read() {
             .collect::<Vec<_>>()
     };
     let idle = toolbar(draw(&mut app));
-    assert_eq!(idle.len(), 5);
+    assert_eq!(idle.len(), 6);
     app.next_live = Instant::now();
     app.tick();
     let poll = app.epoch;
@@ -2011,6 +2016,126 @@ fn favorites_preset_does_not_add_unpinned_engine_items() {
 }
 
 #[test]
+fn saved_presets_keep_their_pids_across_restarts_and_vehicle_support_changes() {
+    let root = temp("live-presets");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("settings.json"), r#"{"favorites":["OBD:010C"]}"#).unwrap();
+    let rpm = "OBD:010C".to_owned();
+    let speed = "OBD:010D".to_owned();
+    let selection = BTreeSet::from([rpm.clone(), speed]);
+    let mut app = Workbench::new(root.clone());
+    let engine = app.selected.clone();
+    assert!(app.settings.live_presets.is_empty());
+    app.selected = selection.clone();
+    app.save_live_preset("  Road test  ").unwrap();
+    app.selected = BTreeSet::from(["OBD:0105".into()]);
+    app.save_live_preset("Cold start").unwrap();
+    drop(app);
+
+    let mut app = Workbench::new(root.clone());
+    assert_eq!(app.selected, engine);
+    assert_eq!(app.settings.favorites, BTreeSet::from([rpm.clone()]));
+    assert_eq!(app.settings.live_presets.len(), 2);
+    app.load_live_preset("Road test").unwrap();
+    app.start_demo();
+    pump(&mut app);
+    app.pid_support.checked_through = 31;
+    app.pid_support.reported = BTreeSet::from([0x0c]);
+    assert_eq!(app.selected, selection);
+    assert_eq!(
+        app.selected_live_queries()
+            .map(query_key)
+            .collect::<Vec<_>>(),
+        vec![rpm]
+    );
+    assert_eq!(app.settings.live_presets["Road test"], selection);
+    assert!(!app.live && !app.poll_in_flight);
+    app.reset_results();
+    assert_eq!(app.selected_live_queries().count(), 2);
+    assert_eq!(app.selected, selection);
+
+    let mut other = Workbench::new(root.clone());
+    other.selected = BTreeSet::from(["OBD:0105".into()]);
+    assert!(other.save_live_preset("road TEST").is_err());
+    assert_eq!(
+        Settings::load(&root).unwrap().live_presets["Road test"],
+        selection
+    );
+    other.delete_live_preset("Road test", &selection).unwrap();
+    other.save_live_preset("Road test").unwrap();
+    assert!(app.delete_live_preset("Road test", &selection).is_err());
+    assert_eq!(
+        Settings::load(&root).unwrap().live_presets["Road test"],
+        other.selected
+    );
+}
+
+#[test]
+fn live_preset_menu_saves_loads_and_deletes_in_a_compact_window() {
+    let mut app = Workbench::new(temp("live-preset-menu"));
+    app.page = Page::Live;
+    app.selected = BTreeSet::from(["OBD:010C".into()]);
+    let ctx = render_context();
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 560.0));
+    let draw = |app: &mut Workbench, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    };
+    let click = |app: &mut Workbench, label: &str| {
+        let output = draw(app, vec![]);
+        let pointer = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == label => {
+                    let rect = text.visual_bounding_rect();
+                    shape
+                        .clip_rect
+                        .intersect(screen)
+                        .expand(1.0)
+                        .contains_rect(rect)
+                        .then_some(rect.center())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Missing {label}"));
+        let button = |pressed| egui::Event::PointerButton {
+            pos: pointer,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        draw(app, vec![egui::Event::PointerMoved(pointer), button(true)]);
+        draw(app, vec![button(false)]);
+    };
+
+    click(&mut app, "Presets");
+    click(&mut app, "Save current selection…");
+    draw(&mut app, vec![]);
+    draw(&mut app, vec![egui::Event::Text("Idle test".into())]);
+    click(&mut app, "Save preset");
+    assert_eq!(app.status, "Saved preset “Idle test”.");
+    assert_eq!(app.settings.live_presets["Idle test"], app.selected);
+    app.preset("Engine");
+    click(&mut app, "Presets");
+    click(&mut app, "Idle test");
+    assert_eq!(app.selected, BTreeSet::from(["OBD:010C".into()]));
+    assert!(!app.busy && !app.live);
+
+    click(&mut app, "Presets");
+    click(&mut app, "Delete…");
+    click(&mut app, "Delete preset");
+    assert!(Settings::load(&app.root).unwrap().live_presets.is_empty());
+    assert_eq!(app.selected, BTreeSet::from(["OBD:010C".into()]));
+}
+
+#[test]
 fn separate_windows_keep_each_others_garage_and_favorite_edits() {
     let root = temp("shared-settings");
     let mut older = Workbench::new(root.clone());
@@ -2760,7 +2885,7 @@ fn every_new_page_renders_in_compact_and_large_windows() {
                     "All codes",
                     "Stored · No current results · 1 unverified",
                 ],
-                Page::Live => &["Start live", "Read once", "Graphs", "Min / max"],
+                Page::Live => &["Start live", "Read once", "Presets", "Graphs", "Min / max"],
                 Page::Emissions => &[
                     "Since clear",
                     "This drive cycle",

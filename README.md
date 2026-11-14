@@ -20,7 +20,7 @@ Check that the adapter supports your vehicle's protocol. Workbench supports ISO 
 ## Scan and save results
 
 - **Overview** runs an emissions scan with stored, pending and permanent codes, readiness since clear and this drive cycle, VIN, and freeze frame.
-- **Live data** shows supported PIDs with graphs and recordings. The header displays DLC voltage and a click-to-copy VIN.
+- **Live data** shows supported PIDs with graphs and recordings. Save named PID selections from **Presets** to reuse across vehicles and sessions. The header displays DLC voltage and a click-to-copy VIN.
 - **Trouble codes** can save a before-clear scan, confirm an emissions clear and save a follow-up scan. Scan history can compare scans that match the same vehicle.
 - **Reports** opens a print-ready scan report. Recordings also export to CSV.
 

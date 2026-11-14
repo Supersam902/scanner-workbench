@@ -282,6 +282,7 @@ impl Workbench {
                     });
             });
         self.confirmations(ctx);
+        self.show_live_preset_dialog(ctx);
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
@@ -1686,6 +1687,7 @@ impl Workbench {
                     self.break_graphs();
                     self.read_live(self.selected_queries(), false);
                 }
+                self.live_presets_menu(ui);
                 let recording = self.recording.is_some();
                 if ui
                     .add_enabled(
@@ -1745,8 +1747,10 @@ impl Workbench {
                     "Advance the replay to see recorded values."
                 } else if !self.connected {
                     "Connect to read live data."
-                } else if read_count == 0 {
+                } else if self.selected.is_empty() {
                     "Select data items to begin."
+                } else if read_count == 0 {
+                    NO_REPORTED_SELECTION
                 } else {
                     "Start live or read once to see readings."
                 },
@@ -1924,16 +1928,9 @@ impl Workbench {
                     );
                     ui.checkbox(&mut self.favorites_only, "Favorites only");
                 });
-                ui.horizontal_wrapped(|ui| {
-                    for preset in ["Engine", "Fuel trims", "Temperature", "Favorites"] {
-                        if ui.button(preset).clicked() {
-                            self.preset(preset);
-                        }
-                    }
-                    if ui.button("Clear selection").clicked() {
-                        self.selected.clear();
-                    }
-                });
+                if ui.button("Clear selection").clicked() {
+                    self.selected.clear();
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("data_picker")
                     .max_height(240.0)

@@ -7,6 +7,7 @@ mod elm;
 mod emissions_scan;
 mod freeze_frames;
 mod graphs;
+mod live_presets;
 mod live_reads;
 pub mod model;
 mod readiness;
@@ -44,6 +45,7 @@ use worker::{
 };
 
 pub const VERSION: &str = env!("SCANNER_WORKBENCH_VERSION");
+const NO_REPORTED_SELECTION: &str = "The vehicle did not report the selected PIDs. Try another preset or turn off Skip unreported PIDs.";
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Page {
@@ -238,6 +240,7 @@ pub struct Workbench {
     vehicle_info_support: Option<PidSupport>,
     pid_support: PidSupport,
     selected: BTreeSet<String>,
+    live_preset_dialog: Option<live_presets::Dialog>,
     search: String,
     favorites_only: bool,
     skip_unreported: bool,
@@ -438,6 +441,7 @@ impl Workbench {
             vehicle_info_support: None,
             pid_support: PidSupport::default(),
             selected: BTreeSet::new(),
+            live_preset_dialog: None,
             search: String::new(),
             favorites_only: false,
             skip_unreported: true,
@@ -786,7 +790,6 @@ impl Workbench {
             notes: "Offline practice session".into(),
             ..Default::default()
         };
-        self.preset("Engine");
         self.busy = true;
         self.connecting = true;
         self.status = "Starting the local simulator...".into();
@@ -1146,23 +1149,6 @@ impl Workbench {
         queries.sort_by_key(|q| self.pid_availability(q) != PidAvailability::Reported);
         queries
     }
-    fn preset(&mut self, name: &str) {
-        self.selected.clear();
-        let pids: &[u8] = match name {
-            "Fuel trims" => &[6, 7, 8, 9, 4, 12, 16],
-            "Temperature" => &[5, 15, 70, 92],
-            _ => &[4, 5, 6, 7, 12, 13, 16, 17, 66],
-        };
-        for q in self.generic {
-            if name != "Favorites"
-                && q.target.is_none()
-                && q.bytes.get(1).is_some_and(|p| pids.contains(p))
-                || name == "Favorites" && self.settings.favorites.contains(&query_key(q))
-            {
-                self.selected.insert(query_key(q));
-            }
-        }
-    }
     fn apply_sample(&mut self, mut sample: Sample) {
         let received_at = sample.at_ms;
         sample.at_ms = self.results.next_sample_ms(sample.at_ms);
@@ -1474,7 +1460,12 @@ impl Workbench {
             let queries = self.selected_queries();
             if queries.is_empty() {
                 self.stop_live();
-                self.status = "Select data items to start live data.".into();
+                self.status = if self.selected.is_empty() {
+                    "Select data items to start live data."
+                } else {
+                    NO_REPORTED_SELECTION
+                }
+                .into();
             } else {
                 self.read_live(queries, true);
             }

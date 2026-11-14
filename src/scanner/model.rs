@@ -107,6 +107,8 @@ impl Vehicle {
 pub struct Settings {
     pub garage: Vec<Vehicle>,
     pub favorites: BTreeSet<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub live_presets: BTreeMap<String, BTreeSet<String>>,
     pub last_vehicle: Option<Vehicle>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_driver: Option<DriverInfo>,
@@ -124,6 +126,16 @@ impl Settings {
     }
 
     pub(super) fn edit(root: &Path, edit: impl FnOnce(&mut Self)) -> Result<Self, String> {
+        Self::try_edit(root, |settings| {
+            edit(settings);
+            Ok(())
+        })
+    }
+
+    pub(super) fn try_edit(
+        root: &Path,
+        edit: impl FnOnce(&mut Self) -> Result<(), String>,
+    ) -> Result<Self, String> {
         std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
         // Hold the lock on a separate file so replacing settings.json keeps it locked.
         let _lock = lock_settings(&root.join("settings.lock")).map_err(|error| {
@@ -134,7 +146,7 @@ impl Settings {
             }
         })?;
         let mut settings = Self::load(root)?;
-        edit(&mut settings);
+        edit(&mut settings)?;
         save_json(&root.join("settings.json"), &settings)?;
         Ok(settings)
     }

@@ -121,6 +121,10 @@ finish. Live Data uses the support reply from Connect and checks additional rang
 the vehicle announces between diagnostic jobs. The default filter skips PIDs
 omitted from checked ranges. Unchecked ranges stay available. Use Refresh PID
 support to check again or turn off Skip unreported PIDs to select all items.
+Choose PIDs under Data items, then use Presets > Save current selection to
+name the set. Choose its name in Presets to reuse those items on another
+vehicle or after a restart. The current vehicle's PID filter still applies.
+When polling is already running, the next cycle uses the new selection.
 Live Data can group up to six reported PIDs with known response sizes in one
 CAN request. If an expected ECU reply is incomplete, the scanner retries the
 affected PIDs individually and uses individual requests until reconnect.
