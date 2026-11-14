@@ -60,7 +60,7 @@ fn worker(path: Arc<Mutex<PathBuf>>) -> (CommandSender, mpsc::Receiver<Event>) {
     worker_with_drivers(move || {
         let path = path.lock().unwrap();
         vec![
-            driver_entry("TIS Techstream VIM", &path),
+            driver_entry("J2534 registry alias", &path),
             driver_entry("Mongoose-Plus MFC3", &path),
         ]
     })
@@ -89,6 +89,7 @@ fn worker_with_saved_connection(
     spawn_with_driver_state(
         Some(env!("CARGO_BIN_EXE_scanner-workstation").into()),
         Some(state.to_owned()),
+        None,
         move || drivers.clone(),
     )
 }
@@ -1798,8 +1799,12 @@ fn selected_j2534_driver_supplies_voltage_and_connections() {
         driver_entry("Other J2534 adapter", &other),
     ]));
     let available = entries.clone();
-    let (tx, rx) = worker_with_drivers(move || available.lock().unwrap().clone());
-    send(&tx, Command::SelectDriver(Some(other.clone())));
+    let (tx, rx) = spawn_with_driver_state(
+        Some(env!("CARGO_BIN_EXE_scanner-workstation").into()),
+        None,
+        Some(other.with_file_name("GENERIC_J2534.DLL")),
+        move || available.lock().unwrap().clone(),
+    );
     until(
         &rx,
         Duration::from_secs(8),
@@ -1833,9 +1838,27 @@ fn selected_j2534_driver_supplies_voltage_and_connections() {
     );
     assert_eq!(marks(&mongoose, "open"), 0);
 
+    entries
+        .lock()
+        .unwrap()
+        .retain(|driver| driver.path != mongoose);
+    entries
+        .lock()
+        .unwrap()
+        .push(driver_entry("Other J2534 adapter", &other));
     send(&tx, Command::SelectDriver(None));
     connect(&tx, 4);
-    connected(&rx, 4);
+    connected_as(&rx, 4, "Other J2534 adapter", Duration::from_secs(8));
+    send(&tx, Command::Disconnect { id: 5 });
+    until(&rx, Duration::from_secs(4), |event| {
+        matches!(event, Event::Disconnected(5))
+    });
+    entries
+        .lock()
+        .unwrap()
+        .push(driver_entry("Mongoose-Plus MFC3", &mongoose));
+    connect(&tx, 6);
+    connected(&rx, 6);
 }
 
 #[test]

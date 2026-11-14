@@ -156,7 +156,7 @@ jobs:
         shell: pwsh
         run: |
           $drop = New-Item -ItemType Directory -Path release-assets
-          Copy-Item -LiteralPath 'dist/scanner-workbench-mfc3-windows-x86.zip','dist/scanner-workbench-mfc3-windows-x86.zip.sha256' -Destination $drop
+          Copy-Item -LiteralPath 'dist/scanner-workbench-windows-x86.zip','dist/scanner-workbench-windows-x86.zip.sha256' -Destination $drop
           if (Test-Path -LiteralPath 'dist/update-assets') {
               Copy-Item -LiteralPath 'dist/update-assets' -Destination $drop -Recurse
           }
@@ -164,7 +164,7 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: scanner-workbench-mfc3-windows-x86
+          name: scanner-workbench-windows-x86
           path: release-assets/
           if-no-files-found: error
           compression-level: 0
@@ -183,12 +183,12 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: scanner-workbench-mfc3-windows-x86
+          name: scanner-workbench-windows-x86
           path: release-assets
 
       - name: Verify the ZIP checksum
         working-directory: release-assets
-        run: sha256sum --check scanner-workbench-mfc3-windows-x86.zip.sha256
+        run: sha256sum --check scanner-workbench-windows-x86.zip.sha256
 
       - name: Create the GitHub draft
         env:
@@ -197,8 +197,8 @@ jobs:
           shopt -s nullglob
           update_assets=(release-assets/update-assets/*)
           gh release create "$GITHUB_REF_NAME" \
-            release-assets/scanner-workbench-mfc3-windows-x86.zip \
-            release-assets/scanner-workbench-mfc3-windows-x86.zip.sha256 \
+            release-assets/scanner-workbench-windows-x86.zip \
+            release-assets/scanner-workbench-windows-x86.zip.sha256 \
             "${update_assets[@]}" \
             --verify-tag --draft --notes-from-tag \
             --title "Scanner Workbench ${GITHUB_REF_NAME#workbench-v}"

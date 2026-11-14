@@ -344,7 +344,8 @@ fn obd_worker(
                             elm327::auto_connect(Some(&progress))
                         } else {
                             Err(elm327::Elm327Error::InitFailed(
-                                "The Corsa D MS-CAN profile requires a selected serial port and baud rate".into(),
+                                "The MS-CAN setup requires a selected serial port and baud rate"
+                                    .into(),
                             ))
                         }
                     };

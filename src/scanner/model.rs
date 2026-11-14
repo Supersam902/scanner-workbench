@@ -1,5 +1,6 @@
 use crate::adapter::{decode_hex, encode_hex};
 use crate::diagnostics::{MONITOR_NOT_COMPLETED, MONITOR_UNKNOWN_SCALING, Query, Reading};
+use crate::j2534::DriverInfo;
 pub use crate::obd::valid_vin;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -87,11 +88,7 @@ impl Vehicle {
             .to_string()
             .parse()
             .unwrap_or(2026);
-        let minimum = if self.make == "Mercedes-Benz" {
-            2005
-        } else {
-            1996
-        };
+        let minimum = 1996;
         if !(minimum..=current + 1).contains(&year) {
             return Err(format!("Model year must be {minimum}-{}", current + 1));
         }
@@ -110,6 +107,8 @@ pub struct Settings {
     pub garage: Vec<Vehicle>,
     pub favorites: BTreeSet<String>,
     pub last_vehicle: Option<Vehicle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_driver: Option<DriverInfo>,
 }
 
 impl Settings {

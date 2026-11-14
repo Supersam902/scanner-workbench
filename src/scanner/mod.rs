@@ -24,12 +24,12 @@ pub mod worker;
 
 use crate::adapter::{decode_hex, encode_hex};
 use crate::diagnostics::{self, PidSupport, Query, Reading, Update};
-use crate::j2534::{CanProtocol, DriverInfo, discover_drivers};
+use crate::j2534::{CanProtocol, DriverInfo, discover_drivers, same_driver_path};
 pub use appearance::icon_data as workbench_icon;
 use model::*;
 use readiness::Period as ReadinessPeriod;
 use std::collections::{BTreeSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -184,6 +184,7 @@ pub struct Workbench {
     splash: StartupSplash,
     driver: Option<String>,
     driver_override: Option<DriverInfo>,
+    driver_save_error: Option<String>,
     installed_drivers: Option<Vec<DriverInfo>>,
     protocol_override: Option<CanProtocol>,
     ecu_source: Option<u8>,
@@ -272,8 +273,6 @@ pub struct Workbench {
     oxygen_sensor: u8,
     oxygen_test: u8,
     manual: String,
-    confirm_control: bool,
-    control_signature: String,
     lookup: String,
     db: crate::dtc_database::DtcDatabase,
 }
@@ -289,13 +288,12 @@ fn generic_catalog() -> &'static [Query] {
 impl Workbench {
     /// An offline workbench for the preview and tests.
     pub fn new(root: PathBuf) -> Self {
-        Self::with_worker(root, worker::spawn_with_driver(None, Vec::new))
+        Self::with_worker(root, |_, _| worker::spawn_with_driver(None, Vec::new))
     }
 
     /// The executable supplied here handles the private --j2534-worker entry point.
     pub fn with_native_driver(root: PathBuf, executable: Option<PathBuf>) -> Self {
-        let worker = worker::spawn(executable, root.clone());
-        let app = Self::with_worker(root, worker);
+        let app = Self::with_worker(root, |root, driver| worker::spawn(executable, root, driver));
         #[cfg(windows)]
         let app = {
             let mut app = app;
@@ -313,7 +311,10 @@ impl Workbench {
         self.splash = StartupSplash::Pending;
     }
 
-    fn with_worker(root: PathBuf, (tx, rx): (CommandSender, mpsc::Receiver<Event>)) -> Self {
+    fn with_worker(
+        root: PathBuf,
+        start_worker: impl FnOnce(&Path, Option<PathBuf>) -> (CommandSender, mpsc::Receiver<Event>),
+    ) -> Self {
         let (settings, notice) = match Settings::load(&root) {
             Ok(s) => (s, String::new()),
             Err(e) => (
@@ -321,6 +322,11 @@ impl Workbench {
                 format!("Settings could not be loaded: {e}"),
             ),
         };
+        let driver_override = settings.preferred_driver.clone();
+        let (tx, rx) = start_worker(
+            &root,
+            driver_override.as_ref().map(|driver| driver.path.clone()),
+        );
         let draft = settings.last_vehicle.clone().unwrap_or_default();
         let db = crate::dtc_database::find_database_path()
             .map(|p| crate::dtc_database::DtcDatabase::load(&p))
@@ -336,7 +342,8 @@ impl Workbench {
             restarting_for_update: None,
             splash: StartupSplash::Hidden,
             driver: None,
-            driver_override: None,
+            driver_override,
+            driver_save_error: None,
             installed_drivers: None,
             protocol_override: None,
             ecu_source: None,
@@ -429,8 +436,6 @@ impl Workbench {
             oxygen_sensor: 1,
             oxygen_test: 5,
             manual: "0902".into(),
-            confirm_control: false,
-            control_signature: String::new(),
             lookup: "P0133".into(),
             db,
         };
@@ -489,7 +494,6 @@ impl Workbench {
         self.connecting = false;
         self.confirm_clear = false;
         self.clearing = false;
-        self.confirm_control = false;
         self.progress = (0, 0, String::new());
     }
     fn stop_operation(&mut self) {
@@ -584,10 +588,25 @@ impl Workbench {
                 self.voltage = None;
                 self.connection_attempts.clear();
                 self.connection_error = None;
-                self.status = "Ready to connect.".into();
+                self.save_driver_preference();
             }
             Err(error) => self.status = format!("Could not change the driver. {error}"),
         }
+    }
+
+    fn save_driver_preference(&mut self) {
+        let driver = self.driver_override.clone();
+        self.status = match self.edit_settings(|settings| settings.preferred_driver = driver) {
+            Ok(()) => {
+                self.driver_save_error = None;
+                "Driver preference saved.".into()
+            }
+            Err(error) => {
+                self.driver_save_error = Some(error);
+                "The driver choice is active for this session. Could not save the preference."
+                    .into()
+            }
+        };
     }
 
     fn connect(&mut self) {
@@ -612,7 +631,7 @@ impl Workbench {
         self.connection_error = None;
         self.adapter_connect = Some(self.epoch);
         self.status = self.driver_override.as_ref().map_or_else(
-            || "Finding the active Mongoose cable…".into(),
+            || "Finding the active J2534 adapter…".into(),
             |driver| format!("Connecting through {}…", driver.name),
         );
         if !self.send(Command::Connect {
@@ -744,7 +763,6 @@ impl Workbench {
         if !polling {
             self.stop_live();
             self.confirm_clear = false;
-            self.confirm_control = false;
             self.progress = (0, queries.len(), String::new());
         }
         self.epoch += 1;
@@ -1181,9 +1199,9 @@ impl Workbench {
                 }
                 Event::Voltage(value) => {
                     if let Some(selected) = &self.driver_override
-                        && value
-                            .as_ref()
-                            .is_some_and(|sample| sample.driver.path != selected.path)
+                        && value.as_ref().is_some_and(|sample| {
+                            !same_driver_path(&sample.driver.path, &selected.path)
+                        })
                     {
                         continue;
                     }
@@ -1648,8 +1666,8 @@ impl Workbench {
     }
     fn manual_query(&self) -> Result<Query, String> {
         let bytes = decode_hex(&self.manual).map_err(|e| e.to_string())?;
-        if bytes.len() > 16 || !matches!(bytes[0], 1 | 2 | 5 | 6 | 8 | 9 | 10) {
-            return Err("Allowed manual services: 01, 02, 05, 06, 08, 09, 0A".into());
+        if bytes.len() > 16 || !matches!(bytes[0], 1 | 2 | 5 | 6 | 9 | 10) {
+            return Err("Choose a read service: 01, 02, 05, 06, 09 or 0A.".into());
         }
         let minimum = match bytes[0] {
             2 | 5 => 3,
@@ -1774,10 +1792,13 @@ impl Workbench {
             Err(err) => {
                 tracing::warn!(%err, "Software update restart failed");
                 self.voltage = None;
-                (self.tx, self.rx) = worker::spawn(std::env::current_exe().ok(), self.root.clone());
-                if let Some(driver) = self.driver_override.take() {
-                    self.select_driver(Some(driver));
-                }
+                (self.tx, self.rx) = worker::spawn(
+                    std::env::current_exe().ok(),
+                    &self.root,
+                    self.driver_override
+                        .as_ref()
+                        .map(|driver| driver.path.clone()),
+                );
                 if let Some(updates) = &mut self.updates {
                     updates.fail(format!("Could not restart to update. {err}"));
                 }

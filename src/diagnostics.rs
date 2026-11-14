@@ -1,4 +1,4 @@
-//! Generic J1979 services and read-only Toyota signal profiles.
+//! Generic J1979 services and signal definitions.
 //! Signal definitions: OBDb, CC BY-SA 4.0; see data/obdb/ATTRIBUTION.txt.
 use crate::adapter::{
     DiagnosticAdapter, DiagnosticResponse, DiagnosticTarget, decode_hex, encode_hex,
@@ -13,14 +13,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-#[path = "mercedes_profiles.rs"]
-mod mercedes_profiles;
 #[path = "oxygen_monitor.rs"]
 pub(crate) mod oxygen_monitor;
-#[path = "toyota_profiles.rs"]
-mod toyota_profiles;
-#[path = "toyota_workspace.rs"]
-mod toyota_workspace;
 #[path = "vehicle_information.rs"]
 mod vehicle_information;
 pub(crate) use vehicle_information::information_name;
@@ -332,23 +326,6 @@ fn legacy_monitor_bitmap(data: &[u8]) -> Option<&[u8]> {
     }
 }
 
-/// Original community sources shared by the classic UI and the new workstation.
-pub fn bundled_profiles() -> Vec<(&'static str, &'static str)> {
-    toyota_profiles::PROFILES
-        .iter()
-        .chain(mercedes_profiles::PROFILES.iter())
-        .copied()
-        .collect()
-}
-
-pub fn load_vehicle_profile(
-    text: &str,
-    year: u16,
-    experimental: bool,
-) -> Result<(Vec<Query>, BTreeMap<String, String>, usize), String> {
-    toyota_workspace::load_profile(text, year, experimental)
-}
-
 pub const SERVICES: &[(u8, &str)] = &[
     (1, "01 · Live data / readiness"),
     (2, "02 · Freeze frame"),
@@ -357,18 +334,17 @@ pub const SERVICES: &[(u8, &str)] = &[
     (5, "05 · Legacy oxygen tests"),
     (6, "06 · Monitor test results"),
     (7, "07 · Pending DTCs"),
-    (8, "08 · Component controls"),
     (9, "09 · Vehicle information"),
     (10, "0A · Permanent DTCs"),
 ];
 
 pub fn read_service(mode: u8) -> bool {
-    matches!(mode, 1 | 2 | 3 | 5 | 6 | 7 | 9 | 10 | 0x19 | 0x21 | 0x22)
+    matches!(mode, 1 | 2 | 3 | 5 | 6 | 7 | 9 | 10)
 }
 
 pub fn catalog(text: &str, year: Option<u16>) -> Result<Vec<Query>, String> {
     if text.len() > 4 * 1024 * 1024 {
-        return Err("Profile exceeds 4 MiB".into());
+        return Err("Signal catalog exceeds 4 MiB".into());
     }
     let root: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let commands = root["commands"]
@@ -396,29 +372,12 @@ pub fn catalog(text: &str, year: Option<u16>) -> Result<Vec<Query>, String> {
         let (service, pid) = cmd.iter().next().unwrap();
         let Some(pid) = pid.as_str() else { continue };
         let bytes = decode_hex(&format!("{service}{pid}")).map_err(|e| e.to_string())?;
-        if !matches!(bytes.first(), Some(1 | 0x21 | 0x22)) {
-            return Err("Profiles may contain only services 01, 21, and 22 (data reads)".into());
+        if bytes.first().copied() != Some(1) {
+            return Err("The signal catalog accepts only Mode 01 reads".into());
         }
         if bytes.len() > 16 {
-            return Err("Profile command is too long".into());
+            return Err("Signal catalog command is too long".into());
         }
-        let mode = bytes[0];
-        let target = if mode == 1 {
-            None
-        } else {
-            let request = command["hdr"]
-                .as_str()
-                .and_then(|s| u32::from_str_radix(s, 16).ok())
-                .ok_or("Invalid request header")?;
-            let response = command["rax"]
-                .as_str()
-                .and_then(|s| u32::from_str_radix(s, 16).ok())
-                .ok_or("Invalid response header")?;
-            if request > 0x1fffffff || response > 0x1fffffff {
-                return Err("Invalid ECU identifier".into());
-            }
-            Some(DiagnosticTarget { request, response })
-        };
         let signals = command["signals"].as_array().cloned().unwrap_or_default();
         let name = signals
             .iter()
@@ -426,30 +385,16 @@ pub fn catalog(text: &str, year: Option<u16>) -> Result<Vec<Query>, String> {
             .filter_map(|s| s["name"].as_str())
             .collect::<Vec<_>>()
             .join(" / ");
-        let key = target
-            .map(|t| format!("{:X}.{:X}.{}", t.request, t.response, encode_hex(&bytes)))
-            .unwrap_or_else(|| encode_hex(&bytes));
-        let verified = year == Some(2012)
-            && include_str!("../data/obdb/corolla-2012-support.yaml")
-                .split("unsupported_commands_by_ecu:")
-                .next()
-                .unwrap_or("")
-                .lines()
-                .any(|line| {
-                    line.trim()
-                        .strip_prefix("- ")
-                        .is_some_and(|line| line.split([':', '|']).next() == Some(key.as_str()))
-                });
         queries.push(Query {
             bytes,
-            target,
+            target: None,
             name,
             signals,
-            verified,
+            verified: false,
         });
     }
     if queries.len() > 2048 {
-        return Err("Too many profile commands".into());
+        return Err("Too many signal catalog commands".into());
     }
     Ok(queries)
 }
@@ -570,6 +515,9 @@ pub fn decode(
         return Err(error.clone());
     }
     let mode = *query.bytes.first().ok_or("Empty request")?;
+    if !matches!(mode, 1..=10) {
+        return Err("Unsupported OBD-II service".into());
+    }
     if reply.payload == [0x7f, mode, 0x78] {
         return Err("ECU response remained pending until the request timed out".into());
     }
@@ -588,8 +536,8 @@ pub fn decode(
         ));
     }
     let prefix_len = match mode {
-        1 | 6 | 8 | 9 | 0x19 | 0x21 => 2,
-        2 | 5 | 0x22 => 3,
+        1 | 6 | 8 | 9 => 2,
+        2 | 5 => 3,
         _ => 1,
     };
     if reply.payload.first() != Some(&mode.wrapping_add(0x40)) {
@@ -626,67 +574,6 @@ pub fn decode(
         return Err("Freeze-frame response has no data".into());
     }
     let mut rows = Vec::new();
-    if mode == 0x19 {
-        if query.bytes.len() != 3 || query.bytes[1] != 2 {
-            return Err("Only UDS reportDTCByStatusMask is decoded".into());
-        }
-        let mask = *data.first().ok_or("Missing UDS status availability mask")?;
-        let records = &data[1..];
-        if records.len() % 4 != 0 {
-            return Err("Truncated UDS DTC/status record".into());
-        }
-        let count = records.len() / 4;
-        rows.push(row(
-            query,
-            reply,
-            "ECU DTC summary".into(),
-            format!(
-                "{count} matching records | requested status {:02X}, available {mask:02X}",
-                query.bytes[2]
-            ),
-            String::new(),
-            None,
-            if mask == 0 {
-                "Status support unavailable; no all-clear conclusion"
-            } else {
-                "Read-only UDS result; raw DTC identifiers, no OEM descriptions"
-            },
-        ));
-        for record in records.chunks_exact(4) {
-            let code = encode_hex(&record[..3]);
-            let status = record[3] & mask;
-            let labels = [
-                "Test failed",
-                "Failed this cycle",
-                "Pending",
-                "Confirmed",
-                "Not completed since clear",
-                "Failed since clear",
-                "Not completed this cycle",
-                "Warning indicator requested",
-            ];
-            let flags = labels
-                .iter()
-                .enumerate()
-                .filter(|(bit, _)| status & (1 << bit) != 0)
-                .map(|(_, label)| *label)
-                .collect::<Vec<_>>()
-                .join(" | ");
-            rows.push(row(
-                query,
-                reply,
-                format!("DTC {code}"),
-                code,
-                "UDS identifier".into(),
-                None,
-                &format!(
-                    "Status {:02X}, availability {mask:02X} | {flags}",
-                    record[3]
-                ),
-            ));
-        }
-        return Ok(rows);
-    }
     if matches!(mode, 3 | 7 | 10) {
         let code_bytes = if can {
             let (&count, payload) = data.split_first().ok_or("Missing CAN DTC count")?;
@@ -901,19 +788,9 @@ pub fn decode(
                 .unwrap_or("Unnamed signal")
                 .to_string();
             match signal_value(signal, data) {
-                Ok((text, number, unit)) => rows.push(row(
-                    query,
-                    reply,
-                    name,
-                    text,
-                    unit,
-                    number,
-                    if query.target.is_some() {
-                        "Read response; profile requires vehicle validation"
-                    } else {
-                        "ECU responded"
-                    },
-                )),
+                Ok((text, number, unit)) => {
+                    rows.push(row(query, reply, name, text, unit, number, "ECU responded"))
+                }
                 Err(message) => {
                     let mut reading = row(
                         query,
@@ -1159,6 +1036,16 @@ pub async fn execute<A: DiagnosticAdapter>(
 ) {
     let can = adapter.connection_info().protocol.contains("CAN");
     if let Some((mode, frame)) = job.discovery {
+        if !matches!(mode, 1 | 2 | 6 | 9) {
+            send(
+                tx,
+                Update::Done(
+                    job.id,
+                    "Support discovery is unavailable for this service".into(),
+                ),
+            );
+            return;
+        }
         let mut scan = SupportScan::new(mode, frame);
         while scan.support.next_range.is_some() && !job.cancelled.load(Ordering::Relaxed) {
             scan.step(adapter, 2000).await;
@@ -1190,8 +1077,30 @@ pub async fn execute<A: DiagnosticAdapter>(
             break;
         }
         let mode = query.bytes.first().copied().unwrap_or(0);
-        if !read_service(mode) && !(job.allow_control && matches!(mode, 4 | 8)) {
-            send(tx,Update::Row(job.id,Reading{source:None,request:encode_hex(&query.bytes),name:query.name,value:"Blocked".into(),unit:String::new(),raw:String::new(),numeric:None,status:"Control requires explicit confirmation; unsupported services are blocked".into(),signal_failure:false}));
+        let control = mode == 4;
+        if !read_service(mode) && (!control || !job.allow_control) {
+            send(
+                tx,
+                Update::Row(
+                    job.id,
+                    Reading {
+                        source: None,
+                        request: encode_hex(&query.bytes),
+                        name: query.name,
+                        value: "Blocked".into(),
+                        unit: String::new(),
+                        raw: String::new(),
+                        numeric: None,
+                        status: if control {
+                            "Control requires explicit confirmation"
+                        } else {
+                            "Unsupported OBD-II service"
+                        }
+                        .into(),
+                        signal_failure: false,
+                    },
+                ),
+            );
             continue;
         }
         let replies = if let Some(target) = query.target {
@@ -1212,20 +1121,8 @@ pub async fn execute<A: DiagnosticAdapter>(
                     let decoded = decode(&query, &reply, can);
                     match decoded {
                         Ok(rows) => {
-                            if mode == 0x19 {
-                                send(
-                                    tx,
-                                    Update::ReplaceRows(
-                                        job.id,
-                                        reply.source,
-                                        encode_hex(&query.bytes),
-                                        rows,
-                                    ),
-                                );
-                            } else {
-                                for row in rows {
-                                    send(tx, Update::Row(job.id, row));
-                                }
+                            for row in rows {
+                                send(tx, Update::Row(job.id, row));
                             }
                         }
                         Err(e) => send(
@@ -1286,13 +1183,11 @@ struct DisplayRow {
 }
 
 pub struct Panel {
-    workspace: toyota_workspace::Workspace,
     service: u8,
     frame: u8,
     selected: BTreeSet<usize>,
     support: BTreeMap<u8, Vec<u8>>,
     generic: Vec<Query>,
-    toyota: Vec<Query>,
     rows: BTreeMap<String, DisplayRow>,
     filter: String,
     manual: String,
@@ -1308,20 +1203,17 @@ pub struct Panel {
     last_run: Instant,
     record: bool,
     record_path: String,
-    toyota_active: bool,
 }
 
 impl Default for Panel {
     fn default() -> Self {
         Self {
-            workspace: toyota_workspace::Workspace::default(),
             service: 1,
             frame: 0,
             selected: BTreeSet::new(),
             support: BTreeMap::new(),
             generic: catalog(include_str!("../data/obdb/saej1979.json"), None)
                 .expect("bundled generic definitions"),
-            toyota: Vec::new(),
             rows: BTreeMap::new(),
             filter: String::new(),
             manual: "00".into(),
@@ -1337,7 +1229,6 @@ impl Default for Panel {
             last_run: Instant::now(),
             record: false,
             record_path: "diagnostics.csv".into(),
-            toyota_active: false,
         }
     }
 }
@@ -1347,8 +1238,6 @@ impl Panel {
         self.cancel.store(true, Ordering::Relaxed);
     }
     pub fn reset(&mut self) {
-        self.workspace.confirm_clear = false;
-        self.workspace.choose_data = false;
         self.cancel.store(true, Ordering::Relaxed);
         self.id = self.id.wrapping_add(1);
         self.busy = false;
@@ -1531,30 +1420,10 @@ impl Panel {
                 .collect()
         }
     }
-    pub fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        toyota: bool,
-        connected: bool,
-        can: bool,
-    ) -> Option<Job> {
-        if toyota {
-            return self.show_toyota_workspace(ui, connected, can);
-        }
-        if toyota != self.toyota_active {
-            self.reset();
-            self.selected.clear();
-            self.repeat = false;
-            self.confirm = false;
-            self.toyota_active = toyota;
-        }
+    pub fn show(&mut self, ui: &mut egui::Ui, connected: bool, can: bool) -> Option<Job> {
         let mut outgoing = None;
-        ui.heading(if toyota {
-            "Toyota enhanced data"
-        } else {
-            "Generic OBD-II · Services 01–0A"
-        });
-        ui.label("Responses are per ECU. Unsupported, unavailable and undecoded values remain explicit. Discovery and polling do not run component controls.");
+        ui.heading("Generic OBD-II");
+        ui.label("Results show replies, unavailable data and undecoded values for each ECU.");
         let old = self.service;
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("generic_service")
@@ -1580,7 +1449,7 @@ impl Panel {
             }
             if ui
                 .add_enabled(
-                    connected && !self.busy && matches!(self.service, 1 | 2 | 6 | 8 | 9),
+                    connected && !self.busy && matches!(self.service, 1 | 2 | 6 | 9),
                     egui::Button::new("Discover support"),
                 )
                 .clicked()
@@ -1654,7 +1523,7 @@ impl Panel {
                     }
                 }
             });
-        let control = !toyota && matches!(self.service, 4 | 8);
+        let control = self.service == 4;
         if control {
             self.repeat = false;
             ui.checkbox(
@@ -1716,15 +1585,49 @@ impl Panel {
                 outgoing = Some(self.job(selected, None, false));
             }
         }
-        ui.collapsing("Manual service request / ECU address",|ui|{
-            ui.label("Suffix bytes after the selected service (e.g. 01: 0C, 02: 0C00, 05: 0101, 06: A1, 08: test ID and documented parameters). Toyota reads must begin with 21 or 22.");
-            ui.horizontal(|ui|{ui.label("Hex:");ui.text_edit_singleline(&mut self.manual);ui.label("Request ECU (optional):");ui.text_edit_singleline(&mut self.request_header);ui.label("Response ECU:");ui.text_edit_singleline(&mut self.response_header);});
-            if ui.add_enabled(connected&&!self.busy&&(!control||self.confirm),egui::Button::new("Send once")).clicked(){
-                let bytes=decode_hex(&if toyota{self.manual.clone()}else{format!("{:02X}{}",self.service,self.manual)});
-                let target=if self.request_header.trim().is_empty(){Ok(None)}else{u32::from_str_radix(self.request_header.trim(),16).and_then(|request|u32::from_str_radix(self.response_header.trim(),16).map(|response|Some(DiagnosticTarget{request,response}))).map_err(|e|e.to_string())};
-                match (bytes,target) {
-                    (Ok(bytes),Ok(target)) if !toyota||matches!(bytes[0],0x21|0x22)=>{outgoing=Some(self.job(vec![Query{bytes,target,name:"Manual request".into(),signals:Vec::new(),verified:false}],None,control));self.confirm=false;},
-                    (Err(e),_)=>self.status=e.to_string(),(_,Err(e))=>self.status=e, _=>self.status="Toyota manual requests are limited to reads (21/22)".into(),
+        ui.collapsing("Manual service request / ECU address", |ui| {
+            ui.label("Enter hex bytes after the selected service.");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Hex");
+                ui.text_edit_singleline(&mut self.manual);
+                ui.label("Request ECU (optional)");
+                ui.text_edit_singleline(&mut self.request_header);
+                ui.label("Response ECU");
+                ui.text_edit_singleline(&mut self.response_header);
+            });
+            if ui
+                .add_enabled(
+                    connected && !self.busy && (!control || self.confirm),
+                    egui::Button::new("Send once"),
+                )
+                .clicked()
+            {
+                let bytes = decode_hex(&format!("{:02X}{}", self.service, self.manual));
+                let target = if self.request_header.trim().is_empty() {
+                    Ok(None)
+                } else {
+                    u32::from_str_radix(self.request_header.trim(), 16).and_then(|request| {
+                        u32::from_str_radix(self.response_header.trim(), 16)
+                            .map(|response| Some(DiagnosticTarget { request, response }))
+                    })
+                };
+                match (bytes, target) {
+                    (Ok(bytes), Ok(target)) => {
+                        outgoing = Some(self.job(
+                            vec![Query {
+                                bytes,
+                                target,
+                                name: "Manual request".into(),
+                                signals: Vec::new(),
+                                verified: false,
+                            }],
+                            None,
+                            control,
+                        ));
+                        self.confirm = false;
+                    }
+                    (Err(error), _) => self.status = error.to_string(),
+                    (_, Err(error)) => self.status = error.to_string(),
                 }
             }
         });

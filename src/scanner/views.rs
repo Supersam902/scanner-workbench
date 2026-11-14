@@ -794,24 +794,43 @@ impl Workbench {
     }
 
     fn driver_picker(&mut self, ui: &mut egui::Ui) {
+        const AUTOMATIC: &str = "Automatic";
         let enabled = !self.busy && (!self.connected || self.demo);
-        let mut selected = self.driver_override.clone();
+        let mut change = None;
         ui.add_enabled_ui(enabled, |ui| {
             ui.horizontal_wrapped(|ui| {
                 let drivers = self.installed_drivers.get_or_insert_with(discover_drivers);
+                let current = self.driver_override.as_ref();
+                let installed = current.and_then(|selected| {
+                    drivers
+                        .iter()
+                        .find(|driver| *driver == selected)
+                        .or_else(|| {
+                            drivers
+                                .iter()
+                                .find(|driver| same_driver_path(&driver.path, &selected.path))
+                        })
+                });
                 ui.label("Driver");
                 egui::ComboBox::from_id_salt("scanner_driver")
                     .width(265.0)
                     .selected_text(
-                        self.driver_override
-                            .as_ref()
-                            .map_or("Automatic (Mongoose)", |driver| &driver.name),
+                        installed
+                            .or(current)
+                            .map_or(AUTOMATIC, |driver| &driver.name),
                     )
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut selected, None, "Automatic (Mongoose)");
+                        if ui.selectable_label(current.is_none(), AUTOMATIC).clicked() {
+                            change = Some(None);
+                        }
                         for driver in drivers.iter() {
-                            ui.selectable_value(&mut selected, Some(driver.clone()), &driver.name)
-                                .on_hover_text(driver.path.display().to_string());
+                            if ui
+                                .selectable_label(installed == Some(driver), &driver.name)
+                                .on_hover_text(driver.path.display().to_string())
+                                .clicked()
+                            {
+                                change = Some(Some(driver.clone()));
+                            }
                         }
                     });
                 if ui.button("Refresh drivers").clicked() {
@@ -819,18 +838,44 @@ impl Workbench {
                 }
             });
         });
-        if selected != self.driver_override {
+        if let Some(selected) = change {
             self.select_driver(selected);
         }
-        if self.driver.is_none() {
-            if self.installed_drivers.as_ref().is_some_and(Vec::is_empty) {
-                caption(ui, "No matching J2534 04.04 drivers found.");
-            } else {
-                caption(
-                    ui,
-                    "Automatic starts with the MFC3. Driver selection lasts until the app closes.",
-                );
-            }
+        if self.driver.is_some() {
+            return;
+        }
+        let unsaved = self.driver_save_error.is_some()
+            || self.settings.preferred_driver != self.driver_override;
+        if let Some(driver) = &self.driver_override
+            && self.installed_drivers.as_ref().is_some_and(|installed| {
+                !installed
+                    .iter()
+                    .any(|entry| same_driver_path(&entry.path, &driver.path))
+            })
+        {
+            ui.colored_label(
+                AMBER,
+                "Selected driver is missing. Reinstall it and refresh, or choose another driver.",
+            )
+            .on_hover_text(driver.path.display().to_string());
+        } else if self.installed_drivers.as_ref().is_some_and(Vec::is_empty) {
+            caption(ui, "No matching J2534 04.04 drivers found.");
+        } else if !unsaved && self.driver_override.is_some() {
+            caption(ui, "Saved for Connect and DLC voltage.");
+        }
+        if unsaved {
+            ui.horizontal_wrapped(|ui| {
+                let status = ui.colored_label(AMBER, "Driver choice is active for this session.");
+                if let Some(error) = &self.driver_save_error {
+                    status.on_hover_text(error);
+                }
+                if ui
+                    .add_enabled(enabled, egui::Button::new("Save driver choice"))
+                    .clicked()
+                {
+                    self.save_driver_preference();
+                }
+            });
         }
     }
 
@@ -3288,20 +3333,12 @@ impl Workbench {
             );
             if action(ui, "Run request", self.connected && !self.busy) {
                 match self.manual_query() {
-                    Ok(q) if q.bytes[0] == 8 => {
-                        self.stop_live();
-                        self.confirm_control = true;
-                        self.control_signature = format!("{}|{}", self.manual, self.epoch);
-                    }
                     Ok(q) => self.once(vec![q]),
                     Err(e) => self.status = e,
                 }
             }
         });
-        caption(
-            ui,
-            "Modes 01, 02, 05, 06, 08, 09 and 0A. Mode 08 requires confirmation.",
-        );
+        caption(ui, "Read services 01, 02, 05, 06, 09 and 0A.");
         let values: Vec<_> = self
             .results
             .rows
@@ -3561,32 +3598,6 @@ impl Workbench {
                         }
                         if ui.button("Cancel").clicked() {
                             self.confirm_clear = false;
-                        }
-                    });
-                });
-        }
-        if self.confirm_control {
-            egui::Window::new("Confirm generic component test")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.set_max_width(490.0);
-                    ui.label("Mode 08 can command a component test. Use only the vehicle's documented test identifier and parameters under the required conditions.");
-                    ui.monospace(&self.manual);
-                    ui.horizontal(|ui| {
-                        let same = self.control_signature == format!("{}|{}", self.manual, self.epoch);
-                        if action(ui, "Run test once", same && self.connected && !self.busy) {
-                            match self.manual_query() {
-                                Ok(query) => {
-                                    self.live = false;
-                                    self.dispatch(vec![query], None, ReadMode::Control);
-                                }
-                                Err(error) => self.status = error,
-                            }
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.confirm_control = false;
                         }
                     });
                 });

@@ -185,7 +185,6 @@ pub enum ObdEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     GenericObd,
-    Toyota,
     Dashboard,
     Sensors,
     DtcCodes,
@@ -800,7 +799,7 @@ impl ObdApp {
             freematics_reader_drops: 0,
             #[cfg(not(target_arch = "wasm32"))]
             freematics_corrupt_records: 0,
-            active_tab: Tab::Toyota,
+            active_tab: Tab::GenericObd,
             log_messages: Vec::new(),
             log_auto_scroll: true,
             log_panel_open: true,
@@ -1581,7 +1580,7 @@ impl ObdApp {
                     .selected_text(match self.elm_can_mode {
                         crate::elm327::ElmCanMode::Auto => "Automatic OBD / HS-CAN",
                         crate::elm327::ElmCanMode::CorsaDMediumSpeed => {
-                            "Corsa D MS-CAN · experimental"
+                            "MS-CAN · 95.2 kbit/s (experimental)"
                         }
                     })
                     .show_ui(ui, |ui| {
@@ -1593,7 +1592,7 @@ impl ObdApp {
                         ui.selectable_value(
                             &mut self.elm_can_mode,
                             crate::elm327::ElmCanMode::CorsaDMediumSpeed,
-                            "Corsa D MS-CAN · 95.2 kbit/s",
+                            "MS-CAN · 95.2 kbit/s (experimental)",
                         );
                     });
             }
@@ -1650,7 +1649,7 @@ impl ObdApp {
                             .on_hover_text("29-bit response source address in hex. Default 10; set from vehicle documentation. This connection queries one ECU.");
                     }
                     ui.label("04.04 driver; CAN / ISO 9141 / KWP2000")
-                        .on_hover_text("Driver must match the app's 32/64-bit architecture. Select the vehicle protocol explicitly. Manufacturer data reads are in Vehicle Diagnostics. Legacy paths require physical validation; PSA-specific drivers are not supported.");
+                        .on_hover_text("Use an installed J2534 04.04 driver that matches the app's architecture, then select the vehicle protocol.");
                     return;
                 }
                 ConnectionKind::Serial => {}
@@ -1776,7 +1775,6 @@ impl ObdApp {
     fn show_tab_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             let tabs = [
-                (Tab::Toyota, "Vehicle Diagnostics"),
                 (Tab::GenericObd, "Generic OBD-II"),
                 (Tab::Dashboard, "Dashboard"),
                 (Tab::Sensors, "Sensors"),
@@ -3006,7 +3004,7 @@ impl ObdApp {
             #[cfg(not(target_arch = "wasm32"))]
             if self.elm_can_mode == crate::elm327::ElmCanMode::CorsaDMediumSpeed {
                 ui.label(
-                    RichText::new("Experimental bus setup only: standard OBD requests remain read-only; Opel module-specific addressing and decoding are not implemented.")
+                    RichText::new("Experimental MS-CAN setup for read-only standard OBD requests.")
                         .color(Color32::from_rgb(220, 180, 80)),
                 );
             }
@@ -3365,28 +3363,6 @@ impl eframe::App for ObdApp {
         } else {
             ctx.set_visuals(egui::Visuals::light());
         }
-        if self.active_tab == Tab::Toyota {
-            ctx.style_mut(|style| {
-                style.spacing.item_spacing = egui::vec2(8.0, 7.0);
-                style
-                    .text_styles
-                    .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-                style
-                    .text_styles
-                    .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
-                style
-                    .text_styles
-                    .insert(egui::TextStyle::Heading, egui::FontId::proportional(21.0));
-                if self.dark_mode {
-                    style.visuals.panel_fill = Color32::from_rgb(19, 29, 42);
-                    style.visuals.override_text_color = Some(Color32::from_rgb(221, 229, 239));
-                    style.visuals.window_fill = Color32::from_rgb(25, 38, 53);
-                    style.visuals.extreme_bg_color = Color32::from_rgb(13, 21, 31);
-                    style.visuals.selection.bg_fill = Color32::from_rgb(34, 91, 143);
-                }
-            });
-        }
-
         egui::TopBottomPanel::top("connection_bar").show(ctx, |ui| {
             ui.add_space(4.0);
             self.show_connection_bar(ui);
@@ -3409,7 +3385,7 @@ impl eframe::App for ObdApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
-            Tab::GenericObd | Tab::Toyota => {
+            Tab::GenericObd => {
                 let can = self
                     .connection_info
                     .as_ref()
@@ -3425,12 +3401,10 @@ impl eframe::App for ObdApp {
                             true
                         }
                     });
-                if let Some(job) = self.diagnostics.show(
-                    ui,
-                    self.active_tab == Tab::Toyota,
-                    self.connected && !self.is_freematics_usb(),
-                    can,
-                ) {
+                if let Some(job) =
+                    self.diagnostics
+                        .show(ui, self.connected && !self.is_freematics_usb(), can)
+                {
                     if self.live_running {
                         self.stop_polling();
                     }

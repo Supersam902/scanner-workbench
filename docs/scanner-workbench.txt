@@ -1,12 +1,11 @@
-SCANNER WORKBENCH FOR MONGOOSE MFC3
+SCANNER WORKBENCH
 Windows 32-bit build, November 13, 2026, revision 26
 
-1. Attach the Mongoose to USB and the vehicle. Turn the ignition on.
-2. Open the app from the MFC3 desktop shortcut or the executable in this folder.
-3. Click Connect at the top. The scanner starts with MFC3 drivers and checks
-   other registered Mongoose drivers if needed. It connects after a verified
-   OBD-II reply. You can start without entering a vehicle. To try another
-   J2534 adapter, choose its installed driver under Connection > Adapter.
+1. Attach the J2534 adapter to the PC and the vehicle. Turn the ignition on.
+2. Open Scanner Workbench from the desktop shortcut or the executable in this folder.
+3. Click Connect at the top. Automatic checks installed 32-bit J2534 04.04
+   drivers and connects after a verified OBD-II reply. Choose a driver under
+   Connection > Adapter to use a particular cable.
    After Connect, the VIN field beside DLC voltage shows the VIN received
    from the vehicle. Hover to highlight it, then click to copy it. The field
    displays Copied briefly. If the VIN is unavailable, use Read VIN under
@@ -67,8 +66,10 @@ Use Protocol override there to limit Connect to a single protocol. A known
 app closes.
 
 The Driver picker lists registered J2534 04.04 drivers for the app's bitness.
-Automatic (Mongoose) is the default. Selecting another driver uses it for
-Connect and for the disconnected voltage reading until the app closes.
+Automatic is the default. Selecting a driver uses it for Connect and the
+DLC voltage reading, and saves the choice for later sessions.
+If the selected driver is missing, reinstall and refresh the list or select
+another installed driver. Choose Automatic to resume automatic selection.
 Support depends on the driver and vehicle protocol. The scanner runs the
 driver in a separate process. If it loses the diagnostic channel or
 stops responding, click Connect to start a fresh session. If an emissions

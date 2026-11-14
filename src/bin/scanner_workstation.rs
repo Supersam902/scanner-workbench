@@ -81,14 +81,14 @@ fn main() -> eframe::Result {
         app.start_demo();
     }
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Scanner Workbench - Mongoose MFC3")
+        .with_title("Scanner Workbench")
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([960.0, 640.0]);
     if let Some(icon) = obd_dashboard::scanner::workbench_icon() {
         viewport = viewport.with_icon(icon);
     }
     let result = eframe::run_native(
-        "Scanner Workbench - Mongoose MFC3",
+        "Scanner Workbench",
         eframe::NativeOptions {
             viewport,
             ..Default::default()

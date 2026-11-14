@@ -27,7 +27,7 @@ $shortPackage = Join-Path $badFeed.FullName $asset.FileName
 $result = Join-Path $test.FullName 'result.txt'
 $state = New-Item -ItemType Directory -Path (Join-Path $test.FullName 'vehicle-data')
 $saved = Join-Path $state.FullName 'settings.json'
-Set-Content -LiteralPath $saved -Value '{"favorites":["OBD:010C"]}' -Encoding utf8
+Set-Content -LiteralPath $saved -Value '{"favorites":["OBD:010C"],"preferred_driver":{"name":"Example J2534 device","path":"C:\\Example\\passthru.dll"}}' -Encoding utf8
 $savedHash = (Get-FileHash -LiteralPath $saved).Hash
 
 function Invoke-LocalCheck($Directory, [switch]$Apply) {

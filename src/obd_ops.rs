@@ -100,7 +100,7 @@ where
             && p.trim().trim_start_matches('A') != "B"
         {
             return Err(Elm327Error::InitFailed(format!(
-                "Requested Corsa D MS-CAN User Protocol B, adapter reports {}",
+                "Requested MS-CAN User Protocol B, adapter reports {}",
                 p.trim()
             )));
         }
@@ -113,9 +113,9 @@ where
 
     if mode == crate::elm327::ElmCanMode::CorsaDMediumSpeed {
         elm.info_mut().protocol = if has_obd_pid_response {
-            "Corsa D MS-CAN · ISO-TP 11-bit · 95.2 kbit/s".into()
+            "MS-CAN · ISO-TP 11-bit · 95.2 kbit/s".into()
         } else {
-            "Corsa D MS-CAN · 95.2 kbit/s · no generic OBD responder".into()
+            "MS-CAN · 95.2 kbit/s · no generic OBD responder".into()
         };
     }
 

@@ -5,7 +5,7 @@ param(
     [string]$ExpectedVersion,
     [string]$OutputDirectory = (Join-Path $PSScriptRoot '../dist'),
     [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9._-]*$')]
-    [string]$ArchiveName = 'scanner-workbench-mfc3-windows-x86',
+    [string]$ArchiveName = 'scanner-workbench-windows-x86',
     [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9._-]*$')]
     [string]$FolderName = 'Scanner-Workbench',
     [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9._-]*\.exe$')]
@@ -24,7 +24,7 @@ if ($pe -lt 0 -or $pe -gt $bytes.Length - 94 -or
     [BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550 -or
     [BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0x14c -or
     [BitConverter]::ToUInt16($bytes, $pe + 92) -ne 2) {
-    throw 'Expected a 32-bit Windows GUI executable for the MFC3.'
+    throw 'Expected a 32-bit Windows GUI executable.'
 }
 if ($ExpectedVersion -and [Diagnostics.FileVersionInfo]::GetVersionInfo($binaryPath).ProductVersion -cne $ExpectedVersion) {
     throw "The scanner executable does not identify itself as version $ExpectedVersion."

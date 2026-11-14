@@ -54,7 +54,7 @@ BEGIN
     BEGIN
         BLOCK "040904B0"
         BEGIN
-            VALUE "FileDescription", "Scanner Workbench for Mongoose MFC3"
+            VALUE "FileDescription", "Scanner Workbench"
             VALUE "FileVersion", "{version}"
             VALUE "ProductName", "Scanner Workbench"
             VALUE "ProductVersion", "{version}"

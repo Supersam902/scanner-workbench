@@ -144,10 +144,18 @@ impl CanProtocol {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DriverInfo {
     pub name: String,
     pub path: PathBuf,
+}
+
+pub(crate) fn same_driver_path(a: &Path, b: &Path) -> bool {
+    a == b
+        || cfg!(windows)
+            && a.to_str()
+                .zip(b.to_str())
+                .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 /// Enumerate the matching Windows registry view. Does not load driver code.
@@ -420,7 +428,7 @@ impl Message {
             return Err(error("Driver returned an invalid message length"));
         }
         let id = u32::from_be_bytes(self.data[..4].try_into().unwrap());
-        // Address matching happens in exchange: enhanced Toyota modules can
+        // Address matching happens in exchange: K-line ECUs can
         // legitimately reply outside the generic 7E8..7EF range.
         let valid = id
             <= if protocol.extended() {

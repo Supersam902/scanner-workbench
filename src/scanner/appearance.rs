@@ -166,7 +166,7 @@ pub(super) fn splash(ctx: &egui::Context) {
                     logo(ui, 58.0);
                     ui.add_space(10.0);
                     ui.label(title("Scanner Workbench", 40.0));
-                    ui.label(label("Mongoose MFC3 · OBD-II diagnostics", 18.0).color(INK));
+                    ui.label(label("J2534 · OBD-II diagnostics", 18.0).color(INK));
                     ui.add_space(18.0);
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(14.0).color(ACCENT));

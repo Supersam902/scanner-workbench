@@ -132,18 +132,27 @@ fn connection_page_keeps_the_latest_mongoose_result_after_starting_practice() {
 }
 
 #[test]
-fn the_driver_picker_changes_the_next_connection_and_voltage_source() {
-    let mut app = Workbench::new(temp("driver-picker"));
-    let (events, rx) = mpsc::channel();
-    app.rx = rx;
-    app.page = Page::Connection;
+fn the_driver_picker_restores_the_preference_for_connection_and_voltage() {
+    let root = temp("driver-picker");
     let driver = DriverInfo {
         name: "Other J2534 adapter".into(),
         path: "other-fixture.dll".into(),
     };
-    app.installed_drivers = Some(vec![driver.clone()]);
-    app.select_driver(Some(driver.clone()));
+    {
+        let mut app = Workbench::new(root.clone());
+        app.select_driver(Some(driver.clone()));
+        assert_eq!(app.driver_override.as_ref(), Some(&driver));
+        assert_eq!(app.status, "Driver preference saved.");
+    }
+    let mut app = Workbench::with_worker(root.clone(), |_, selected| {
+        assert_eq!(selected.as_deref(), Some(driver.path.as_path()));
+        worker::spawn_with_driver(None, Vec::new)
+    });
+    let (events, rx) = mpsc::channel();
+    app.rx = rx;
+    app.page = Page::Connection;
     assert_eq!(app.driver_override.as_ref(), Some(&driver));
+    app.installed_drivers = Some(vec![]);
 
     let ctx = render_context();
     let output = ctx.run(
@@ -158,6 +167,9 @@ fn the_driver_picker_changes_the_next_connection_and_voltage_source() {
     );
     assert!(output.shapes.iter().any(|shape| {
         matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == driver.name)
+    }));
+    assert!(output.shapes.iter().any(|shape| {
+        matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text.contains("Selected driver is missing."))
     }));
 
     for candidate in [
@@ -181,6 +193,37 @@ fn the_driver_picker_changes_the_next_connection_and_voltage_source() {
     assert!(app.status.contains(&driver.name));
     app.select_driver(None);
     assert_eq!(app.driver_override.as_ref(), Some(&driver));
+    app.cancel_operation();
+    app.select_driver(None);
+    assert!(app.driver_override.is_none());
+    drop(app);
+    let app = Workbench::with_worker(root, |_, selected| {
+        assert!(selected.is_none());
+        worker::spawn_with_driver(None, Vec::new)
+    });
+    assert!(app.driver_override.is_none());
+}
+
+#[test]
+fn saving_a_driver_preference_can_retry_after_a_write_failure() {
+    let root = temp("retry-driver-preference");
+    std::fs::write(&root, b"blocked settings directory").unwrap();
+    let mut app = Workbench::new(root.clone());
+    let driver = DriverInfo {
+        name: "Other J2534 adapter".into(),
+        path: "other-fixture.dll".into(),
+    };
+    app.select_driver(Some(driver.clone()));
+    assert_eq!(app.driver_override.as_ref(), Some(&driver));
+    assert!(app.settings.preferred_driver.is_none());
+    assert!(app.driver_save_error.is_some());
+    std::fs::remove_file(&root).unwrap();
+    app.save_driver_preference();
+    assert!(app.driver_save_error.is_none());
+    assert_eq!(
+        Settings::load(&root).unwrap().preferred_driver,
+        Some(driver)
+    );
 }
 
 #[test]
@@ -1726,10 +1769,9 @@ fn garage_validates_vin_and_supported_years_without_slicing_unicode() {
     assert!(valid_vin("WDD00000000000000"));
     let mut v = vehicle();
     v.validate().unwrap();
-    v.make = "Mercedes-Benz".into();
-    v.year = "2004".into();
+    v.year = "1995".into();
     assert!(v.validate().is_err());
-    v.year = "2005".into();
+    v.year = "1996".into();
     v.validate().unwrap();
 }
 #[test]
@@ -1753,7 +1795,7 @@ fn simulator_clears_only_emissions_and_keeps_permanent_codes() {
     );
     assert_eq!(
         block_on(adapter.request(&[0x19, 2, 0xff], 100)).unwrap()[0].payload,
-        [0x59, 2, 0xff, 0x12, 0x34, 0x56, 9]
+        [0x7f, 0x19, 0x11]
     );
 }
 #[test]
@@ -1868,10 +1910,9 @@ fn stop_rejects_queued_old_events_and_control_confirmation() {
     let mut app = Workbench::new(temp("epoch"));
     let id = app.epoch;
     app.confirm_clear = true;
-    app.confirm_control = true;
     app.cancel_operation();
     assert_ne!(app.epoch, id);
-    assert!(!app.confirm_clear && !app.confirm_control);
+    assert!(!app.confirm_clear);
     assert!(!app.live);
     let (events, rx) = mpsc::channel();
     app.rx = rx;

@@ -1,6 +1,6 @@
 # Scanner Workbench releases on GitHub
 
-Scanner Workbench releases are hosted at [Supersam902/scanner-workbench](https://github.com/Supersam902/scanner-workbench/releases). A Workbench release uses Windows x86 to load the 32-bit Mongoose MFC3 J2534 driver. The separate OBD-II Dashboard release workflow builds the original app for several platforms.
+Scanner Workbench releases are hosted at [Supersam902/scanner-workbench](https://github.com/Supersam902/scanner-workbench/releases). The Windows x86 build loads 32-bit J2534 04.04 vendor drivers. The separate OBD-II Dashboard release workflow builds the classic app for several platforms.
 
 ## Package from the checkout
 
@@ -10,13 +10,13 @@ Build the locked Rust project for `i686-pc-windows-gnu` using an x86 MinGW toolc
 ./scripts/package-scanner.ps1 -Binary ./target/i686-pc-windows-gnu/release/scanner-workstation.exe
 ```
 
-The script writes `dist/scanner-workbench-mfc3-windows-x86.zip` and its `.sha256` file. The archive contains the app, code definitions, and license notices. The driver is installed separately on the vehicle computer. The packager reads only the build and source assets, so it runs without a connected cable or access to local scan data.
+The script writes `dist/scanner-workbench-windows-x86.zip` and its `.sha256` file. The archive contains the app, code definitions, and license notices. Install the adapter vendor's driver separately.
 
 ## Publish the first build
 
 1. [Scanner Workbench Windows x86](../.github/workflows/scanner-release.yml) runs for changes to `main` and for pull requests into `main`. You can also run it from the Actions tab. It uses Rust 1.99.1 and WinLibs GCC 16.2.0 for i686, runs the x86 tests, and uploads the ZIP and checksum to the run. Enable **Run an isolated Windows upgrade test** on a manual run to check installation and restart in a scratch directory.
 2. Push an annotated tag such as `workbench-v0.1.0` on the commit to release. The workflow embeds the version from the tag in the executable, runs the isolated upgrade test and creates a draft release with the ZIP, installer and feed. **Connection → Updates** shows the installed version.
-3. Verify the draft on a clean Windows computer with the Mongoose driver installed. Publish the draft as the latest stable release to activate the shared [portable ZIP download](https://github.com/Supersam902/scanner-workbench/releases/latest/download/scanner-workbench-mfc3-windows-x86.zip). Use a dedicated repository for this feed if other apps have their own release tags. [Linking to GitHub releases](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)
+3. Verify the draft and publish it as the latest stable release to activate the shared [portable ZIP download](https://github.com/Supersam902/scanner-workbench/releases/latest/download/scanner-workbench-windows-x86.zip). Use a dedicated repository for this feed if other apps have their own release tags. [Linking to GitHub releases](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)
 
 ## Enable the installer and update feed
 

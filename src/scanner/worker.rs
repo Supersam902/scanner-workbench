@@ -7,7 +7,7 @@ use crate::diagnostics::{self, Job, PidSupport, Query, Reading, SupportScan, Upd
 use crate::elm327::{ConnectionInfo, Elm327Error, block_on};
 use crate::j2534::{
     CanProtocol, DriverInfo, KLINE_SESSION_IDLE_MS, ProbePhase, discover_drivers, format_voltage,
-    is_pid00_reply,
+    is_pid00_reply, same_driver_path,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -379,9 +379,15 @@ impl DriverRuntime {
 
 pub(super) fn spawn(
     executable: Option<PathBuf>,
-    data_dir: PathBuf,
+    data_dir: &Path,
+    selected_driver: Option<PathBuf>,
 ) -> (CommandSender, mpsc::Receiver<Event>) {
-    spawn_with_driver_state(executable, Some(data_dir), discover_drivers)
+    spawn_with_driver_state(
+        executable,
+        Some(data_dir.to_owned()),
+        selected_driver,
+        discover_drivers,
+    )
 }
 
 #[doc(hidden)]
@@ -389,13 +395,14 @@ pub fn spawn_with_driver(
     executable: Option<PathBuf>,
     discover: impl Fn() -> Vec<DriverInfo> + Send + 'static,
 ) -> (CommandSender, mpsc::Receiver<Event>) {
-    spawn_with_driver_state(executable, None, discover)
+    spawn_with_driver_state(executable, None, None, discover)
 }
 
 #[doc(hidden)]
 pub fn spawn_with_driver_state(
     executable: Option<PathBuf>,
     data_dir: Option<PathBuf>,
+    selected_driver: Option<PathBuf>,
     discover: impl Fn() -> Vec<DriverInfo> + Send + 'static,
 ) -> (CommandSender, mpsc::Receiver<Event>) {
     let (sender, rx) = mpsc::sync_channel(8);
@@ -408,7 +415,7 @@ pub fn spawn_with_driver_state(
         activity: activity.clone(),
         shutdown: shutdown.clone(),
     };
-    let _thread = std::thread::spawn(move || run(rx, events, discover, runtime));
+    let _thread = std::thread::spawn(move || run(rx, events, discover, runtime, selected_driver));
     let tx = CommandSender {
         sender,
         activity,
@@ -645,12 +652,24 @@ fn driver_candidates(
         }
     }
     if let Some(path) = selected {
-        drivers.retain(|driver| driver.path == path);
-        drivers.truncate(1);
-        return drivers;
+        let selected = drivers
+            .iter()
+            .position(|driver| driver.path == path)
+            .or_else(|| {
+                drivers
+                    .iter()
+                    .position(|driver| same_driver_path(&driver.path, path))
+            });
+        return selected
+            .map(|index| drivers.swap_remove(index))
+            .into_iter()
+            .collect();
     }
-    drivers.retain(|driver| rank(driver) < 2);
-    drivers.sort_by_key(|driver| (rank(driver), preferred != Some(driver.path.as_path())));
+    // Keep the original cable priority while allowing other registered drivers.
+    drivers.sort_by_key(|driver| {
+        let remembered = preferred.is_some_and(|path| same_driver_path(&driver.path, path));
+        (rank(driver), !remembered)
+    });
     let mut seen = BTreeSet::new();
     drivers.retain(|driver| seen.insert(driver.path.to_string_lossy().to_ascii_lowercase()));
     drivers
@@ -694,7 +713,7 @@ fn connect_vehicle(
         }
         let mut protocols = default_protocols.to_vec();
         let remembered = last_connection
-            .filter(|connection| automatic && connection.driver == driver.path)
+            .filter(|connection| automatic && same_driver_path(&connection.driver, &driver.path))
             .map(|connection| connection.protocol);
         if let Some(index) = protocols
             .iter()
@@ -926,7 +945,7 @@ fn sample_idle_voltage(
 ) -> Result<Option<VoltageSample>, String> {
     let mut drivers = driver_candidates(discover(), selected, None);
     if let Some(path) = preferred {
-        drivers.sort_by_key(|driver| driver.path != path);
+        drivers.sort_by_key(|driver| !same_driver_path(&driver.path, path));
     }
     let mut zero_sample = None;
     let mut driver_failure = None;
@@ -1497,6 +1516,7 @@ fn run(
     tx: mpsc::Sender<Event>,
     discover: impl Fn() -> Vec<DriverInfo>,
     runtime: DriverRuntime,
+    mut selected_driver: Option<PathBuf>,
 ) {
     let mut link: Option<Link> = None;
     let mut pid_scan = SupportScan::new(1, 0);
@@ -1506,7 +1526,6 @@ fn run(
     let mut scan_responders = ScanResponders::new();
     let mut grouping_allowed = true;
     let mut idle_voltage = Instant::now() + VOLTAGE_INTERVAL;
-    let mut selected_driver = None::<PathBuf>;
     let mut voltage_driver = None::<PathBuf>;
     let mut kline_retry_at = Instant::now();
     let mut last_connection = None::<LastConnection>;
@@ -1637,7 +1656,7 @@ fn run(
                         "The selected J2534 driver is no longer listed. Choose an installed driver under Connection."
                             .into()
                     } else {
-                        "No Mongoose driver found. Install its 32-bit J2534 04.04 driver or select another adapter under Connection."
+                        "No J2534 04.04 drivers found. Install a vendor driver that matches the app architecture."
                             .into()
                     })
                 } else {
@@ -2235,25 +2254,6 @@ impl DemoAdapter {
                 (0x21, _) => [0, 220, 0, 0, 0, 200],
                 _ => [0, 80, 0, 0, 0, 200],
             });
-        } else if mode == 0x19 {
-            p.extend([2, 0xff]);
-            // Generic Mode 04 does not simulate clearing an OEM module's memory.
-            p.extend([0x12, 0x34, 0x56, 9]);
-        } else if mode == 0x22 {
-            p.extend_from_slice(
-                bytes
-                    .get(1..3)
-                    .ok_or_else(|| Elm327Error::ProtocolError("Missing DID".into()))?,
-            );
-            let mut values = vec![0; 64];
-            values[0] = 65;
-            values[1] = 80;
-            values[3] = 100;
-            values[11] = 85;
-            p.extend(values);
-        } else if mode == 0x21 {
-            p.push(pid);
-            p.extend([0x40; 64]);
         } else {
             p = vec![0x7f, mode, 0x11];
         }

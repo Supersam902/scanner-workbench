@@ -62,14 +62,16 @@ fn manual_can_mode01_group_accepts_reordered_raw_data() {
 }
 
 #[test]
-fn bundled_catalogs_load_and_model_filters_respect_recorded_corolla_year() {
+fn bundled_catalog_loads_only_generic_engine_data_requests() {
     let generic = catalog(include_str!("../data/obdb/saej1979.json"), None).unwrap();
     assert_eq!(generic.len(), 205);
-    let toyota = catalog(include_str!("../data/obdb/toyota-corolla.json"), Some(2012)).unwrap();
-    assert!(toyota.iter().filter(|q| q.verified).count() > 40);
-    assert!(toyota.iter().any(|q| q.bytes == [0x21, 0x82] && q.verified));
-    assert!(!toyota.iter().any(|q| q.bytes == [0x22, 0x10, 0xcd]));
+    assert!(
+        generic
+            .iter()
+            .all(|q| q.bytes.first() == Some(&1) && q.target.is_none())
+    );
     assert!(catalog(r#"{"commands":[{"cmd":{"04":""}}]}"#, None).is_err());
+    assert!(catalog(r#"{"commands":[{"cmd":{"21":"82"}}]}"#, None).is_err());
 }
 
 #[test]
@@ -224,40 +226,6 @@ fn drive_cycle_readiness_decodes_enable_and_completion_without_claiming_support(
             .any(|r| r.name == "Oxygen sensor monitoring")
     );
     assert!(decode(&cycle, &response(&[0x41, 0x41, 0, 0x07, 0]), true).is_err());
-}
-
-#[test]
-fn recorded_corolla_transmission_and_misfire_responses_decode() {
-    // Diagnostic payloads reassembled from OBDb's 2012 Corolla 2182/2145
-    // capture fixtures. Original data and attribution are retained in data/obdb.
-    let toyota = catalog(include_str!("../data/obdb/toyota-corolla.json"), Some(2012)).unwrap();
-    let atf = toyota.iter().find(|q| q.bytes == [0x21, 0x82]).unwrap();
-    let values = decode(
-        atf,
-        &response(&[0x61, 0x82, 0x45, 0x60, 0x81, 0x18, 0x08, 0x18]),
-        true,
-    )
-    .unwrap();
-    assert_eq!(values[0].numeric, Some(29.375));
-    assert_eq!(values[1].numeric, Some(89.09375));
-    let misfire = toyota.iter().find(|q| q.bytes == [0x21, 0x45]).unwrap();
-    let values = decode(
-        misfire,
-        &response(&[0x61, 0x45, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xc7]),
-        true,
-    )
-    .unwrap();
-    assert!(
-        values
-            .iter()
-            .any(|r| r.name == "Cylinder #1 misfire count" && r.numeric == Some(0.0))
-    );
-    assert!(
-        values
-            .iter()
-            .any(|r| r.name == "Misfire margin" && r.numeric == Some(71.0))
-    );
-    assert!(decode(atf, &response(&[0x61, 0x85, 0, 0]), true).is_err());
 }
 
 #[test]
@@ -644,32 +612,34 @@ fn controls_require_confirmation_and_cancellation_does_not_transmit() {
 }
 
 #[test]
-fn uds_execution_replaces_results_only_after_a_complete_positive_read() {
-    for (payload, replacement) in [
-        (vec![0x59, 2, 0xff, 0x12, 0x34, 0x56, 9], true),
-        (vec![0x59, 2, 0xff], true),
-        (vec![0x59, 2, 0xff, 0x12], false),
-        (vec![0x7f, 0x19, 0x11], false),
-    ] {
-        let mut adapter = Fake::new(vec![(vec![0x19, 2, 0xff], vec![response(&payload)])]);
-        let (tx, rx) = mpsc::channel();
-        block_on(execute(
-            &mut adapter,
-            job(vec![query(&[0x19, 2, 0xff])]),
-            &tx,
-        ));
-        let events = rx.try_iter().collect::<Vec<_>>();
-        assert_eq!(events.iter().any(|e| matches!(e, ObdEvent::Diagnostics(Update::ReplaceRows(1, Some(0x7e8), request, rows)) if request == "1902FF" && !rows.is_empty())), replacement);
-        assert_eq!(events.iter().any(|e| matches!(e, ObdEvent::Diagnostics(Update::Row(1, Reading { value, .. })) if value == "Unavailable")), !replacement);
-        assert!(adapter.expected.is_empty());
-    }
+fn active_tests_and_enhanced_requests_are_blocked_even_when_clear_is_confirmed() {
+    let mut adapter = Fake::new(Vec::new());
+    let (tx, rx) = mpsc::channel();
+    let mut job = job(vec![
+        query(&[8, 1]),
+        query(&[0x19, 2, 0xff]),
+        query(&[0x21, 0x82]),
+        query(&[0x22, 0xf1, 0x90]),
+    ]);
+    job.allow_control = true;
+    block_on(execute(&mut adapter, job, &tx));
+    let blocked: Vec<String> = rx
+        .try_iter()
+        .filter_map(|event| match event {
+            ObdEvent::Diagnostics(Update::Row(1, reading)) if reading.value == "Blocked" => {
+                Some(reading.request)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(blocked, ["0801", "1902FF", "2182", "22F190"]);
 }
 
 #[test]
-fn diagnostics_panels_render_without_a_vehicle() {
+fn generic_diagnostics_render_without_a_vehicle() {
     let mut panel = Panel::default();
     let context = egui::Context::default();
-    for toyota in [false, true] {
+    for can in [false, true] {
         let output = context.run(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -680,7 +650,7 @@ fn diagnostics_panels_render_without_a_vehicle() {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    assert!(panel.show(ui, toyota, false, true).is_none());
+                    assert!(panel.show(ui, false, can).is_none());
                 });
             },
         );
