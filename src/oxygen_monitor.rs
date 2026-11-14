@@ -7,6 +7,7 @@ pub(crate) const THRESHOLD: &str = "ECU parameter";
 pub(crate) const COMPLETION_UNKNOWN: &str = "Monitor completion unverified";
 pub(crate) const LIMITS_UNKNOWN: &str = "Limits unavailable";
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn request_parts(request: &str) -> Option<(u8, u8)> {
     if request.len() != 6 || !request.starts_with("05") {
         return None;
@@ -33,6 +34,7 @@ pub(crate) fn test_name(id: u8) -> String {
     .into()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn sensor_label(mask: u8, sensors_per_bank: Option<u8>) -> String {
     if let Some(width) = sensors_per_bank.filter(|_| mask.is_power_of_two()) {
         let bit = mask.trailing_zeros() as u8;

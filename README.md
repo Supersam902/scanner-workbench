@@ -37,6 +37,8 @@ cargo build --locked --release --target i686-pc-windows-gnu --bin scanner-workst
 cargo test --locked --target i686-pc-windows-gnu --all-targets
 ```
 
-The classic `obd-dashboard` target supports generic OBD-II through ELM-compatible serial or TCP adapters and native J2534. The browser build uses Web Serial. See [adapter implementation notes](docs/adapters.md).
+### Classic dashboard
+
+Build the classic desktop app with `cargo build --locked --release --bin obd-dashboard`. Select **Serial** for an ELM-compatible adapter that appears as a serial port, or **TCP** and enter the adapter's host and port. For the browser build, install the `wasm32-unknown-unknown` target and run `trunk serve` from the checkout. Open it in a browser with Web Serial. See [adapter implementation notes](docs/adapters.md).
 
 The application uses the [MIT license](LICENSE). Generic OBDb data is licensed under CC BY-SA 4.0. See the [data attribution](data/obdb/ATTRIBUTION.txt).

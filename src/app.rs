@@ -1672,6 +1672,7 @@ impl ObdApp {
                     },
                 );
                 for port in &self.available_ports {
+                    #[cfg(not(target_arch = "wasm32"))]
                     if detecting_freematics && !is_usb_serial_port_name(port) {
                         continue;
                     }
@@ -2464,6 +2465,7 @@ impl ObdApp {
             return;
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         if self.is_freematics_usb() {
             ui.label("This connection is read-only; active diagnostic requests are unavailable.");
             let captured = self
@@ -2475,7 +2477,8 @@ impl ObdApp {
                 RichText::new(format!("Latest device frame captured: {captured}"))
                     .color(Color32::from_gray(145)),
             );
-        } else {
+        }
+        if !self.is_freematics_usb() {
             ui.horizontal(|ui| {
                 if self.live_running {
                     if ui.button("Stop").clicked() {
@@ -2588,6 +2591,7 @@ impl ObdApp {
             return;
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         if self.is_freematics_usb() {
             ui.label(
                 RichText::new("Device-reported scan results · read-only")
@@ -2841,6 +2845,7 @@ impl ObdApp {
             return;
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         if self.is_freematics_usb() {
             self.show_freematics_freeze_frame(ui);
             return;
@@ -3087,6 +3092,7 @@ impl ObdApp {
                         ui.end_row();
                     }
 
+                    #[cfg(not(target_arch = "wasm32"))]
                     if self.is_freematics_usb() {
                         ui.label(RichText::new("Device-reported supported Mode 01 PIDs:").strong());
                         ui.label(if !self.freematics_support_reported {
@@ -3207,9 +3213,11 @@ impl ObdApp {
             ui.add_space(16.0);
 
             // ── Supported PIDs section ────────────────────────────
-            if !self.supported_pids.is_empty()
-                || (self.is_freematics_usb() && self.freematics_support_reported)
-            {
+            let show_supported = !self.supported_pids.is_empty();
+            #[cfg(not(target_arch = "wasm32"))]
+            let show_supported =
+                show_supported || (self.is_freematics_usb() && self.freematics_support_reported);
+            if show_supported {
                 ui.heading("Supported PIDs");
                 ui.add_space(4.0);
 

@@ -1201,7 +1201,9 @@ pub struct Panel {
     repeat: bool,
     interval: f32,
     last_run: Instant,
+    #[cfg(not(target_arch = "wasm32"))]
     record: bool,
+    #[cfg(not(target_arch = "wasm32"))]
     record_path: String,
 }
 
@@ -1227,7 +1229,9 @@ impl Default for Panel {
             repeat: false,
             interval: 2.0,
             last_run: Instant::now(),
+            #[cfg(not(target_arch = "wasm32"))]
             record: false,
+            #[cfg(not(target_arch = "wasm32"))]
             record_path: "diagnostics.csv".into(),
         }
     }
@@ -1271,48 +1275,45 @@ impl Panel {
                 }
             }
             Update::Row(id, reading) if id == self.id => {
+                #[cfg(not(target_arch = "wasm32"))]
                 if self.record {
-                    #[cfg(not(target_arch = "wasm32"))]
+                    use std::io::Write;
+                    let exists = std::path::Path::new(&self.record_path).exists();
+                    match std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&self.record_path)
                     {
-                        use std::io::Write;
-                        let exists = std::path::Path::new(&self.record_path).exists();
-                        match std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&self.record_path)
-                        {
-                            Ok(mut f) => {
-                                if !exists {
-                                    let _ =
-                                        writeln!(f, "time,ecu,request,name,value,unit,status,raw");
-                                }
-                                let fields = [
-                                    chrono::Local::now().to_rfc3339(),
-                                    reading.source.map(|s| format!("{s:X}")).unwrap_or_default(),
-                                    reading.request.clone(),
-                                    reading.name.clone(),
-                                    reading.value.clone(),
-                                    reading.unit.clone(),
-                                    reading.status.clone(),
-                                    reading.raw.clone(),
-                                ];
-                                if let Err(e) = writeln!(
-                                    f,
-                                    "{}",
-                                    fields
-                                        .iter()
-                                        .map(|s| format!("\"{}\"", s.replace('"', "\"\"")))
-                                        .collect::<Vec<_>>()
-                                        .join(",")
-                                ) {
-                                    self.status = format!("Recording failed: {e}");
-                                    self.record = false;
-                                }
+                        Ok(mut f) => {
+                            if !exists {
+                                let _ = writeln!(f, "time,ecu,request,name,value,unit,status,raw");
                             }
-                            Err(e) => {
+                            let fields = [
+                                chrono::Local::now().to_rfc3339(),
+                                reading.source.map(|s| format!("{s:X}")).unwrap_or_default(),
+                                reading.request.clone(),
+                                reading.name.clone(),
+                                reading.value.clone(),
+                                reading.unit.clone(),
+                                reading.status.clone(),
+                                reading.raw.clone(),
+                            ];
+                            if let Err(e) = writeln!(
+                                f,
+                                "{}",
+                                fields
+                                    .iter()
+                                    .map(|s| format!("\"{}\"", s.replace('"', "\"\"")))
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            ) {
                                 self.status = format!("Recording failed: {e}");
                                 self.record = false;
                             }
+                        }
+                        Err(e) => {
+                            self.status = format!("Recording failed: {e}");
+                            self.record = false;
                         }
                     }
                 }
