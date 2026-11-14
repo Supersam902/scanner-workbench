@@ -1,21 +1,21 @@
 # Scanner Workbench
 
-Scanner Workbench is a generic OBD-II diagnostic app for Windows. It supports compatible J2534 pass-through cables and ELM-compatible USB serial, Bluetooth serial, and Wi-Fi/TCP adapters. Read emissions trouble codes, readiness monitors, freeze frames, VIN and live data.
+Scanner Workbench is a generic OBD-II scan tool for Windows that works with a wide range of adapters. Connect with an ELM327-compatible USB, Bluetooth serial, or Wi-Fi/TCP adapter, or with a compatible J2534 pass-through interface. Read trouble codes, emissions readiness, freeze frames, VIN, and live data.
 
 **[Download the Windows installer](https://github.com/Supersam902/scanner-workbench/releases/latest/download/ScannerWorkbenchApp-win-x86-Setup.exe)** · [Portable ZIP and release notes](https://github.com/Supersam902/scanner-workbench/releases/latest)
 
 ## Adapter compatibility
 
-| Adapter connection | Where it works |
+| Adapter type | What to look for |
 | --- | --- |
-| J2534 pass-through with a 32-bit Windows 04.04 driver | Scanner Workbench |
-| ELM-compatible USB or Bluetooth that appears as a serial port | Scanner Workbench and classic desktop dashboard |
-| ELM-compatible Wi-Fi with a TCP connection | Scanner Workbench and classic desktop dashboard |
-| ELM-compatible serial available through Web Serial | Classic browser dashboard |
+| ELM327-compatible USB | A Windows COM port when plugged in |
+| ELM327-compatible Bluetooth serial (SPP) | A Windows COM port after pairing |
+| ELM327-compatible Wi-Fi | A TCP host and port in the adapter's instructions |
+| J2534 pass-through | A vendor-supplied 32-bit Windows J2534 04.04 driver |
 
 Open **Connection → Adapter** to choose the adapter type. J2534 uses the vendor's **32-bit Windows 04.04 driver** and detects supported cables automatically. For ELM serial, choose the adapter's COM port. For Wi-Fi/TCP, enter the host and port specified by the adapter. Workbench saves your choice for **Connect** and the DLC voltage readout. It verifies an OBD-II reply before showing the vehicle as connected.
 
-Workbench supports ISO 15765 CAN (11-bit and 29-bit), ISO 9141-2, ISO 14230 KWP2000, and SAE J1850 VPW/PWM when the adapter implements the vehicle's protocol. ELM adapters need standard protocol detection and ECU headers. Available readings depend on the adapter and the ECUs that respond.
+Check that the adapter supports your vehicle's protocol. Workbench supports ISO 15765 CAN (11-bit and 29-bit), ISO 9141-2, ISO 14230 KWP2000, and SAE J1850 VPW/PWM. ELM327-compatible adapters need automatic OBD-II protocol detection and ECU response headers. Available readings depend on the adapter and the ECUs that respond.
 
 ## Scan and save results
 
