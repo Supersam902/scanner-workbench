@@ -69,7 +69,7 @@ impl Check {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct CheckResult {
     replies: usize,
     issues: usize,
@@ -211,7 +211,7 @@ impl CheckResult {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scan {
     pub(super) started_ms: u64,
     pub(super) state: State,

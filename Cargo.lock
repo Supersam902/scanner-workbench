@@ -2285,6 +2285,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serialport",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "tracing-wasm",

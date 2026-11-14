@@ -1,11 +1,13 @@
 use super::model::{lock_file, read_json, save_json};
+use super::scan_file;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
 
 pub(super) const WORK_ORDER_LIMIT: usize = 100;
 pub(super) const NOTES_LIMIT: usize = 4000;
-pub(super) const UNSAVED_MESSAGE: &str = "Save or discard the edited scan notes before printing.";
+pub(super) const UNSAVED_MESSAGE: &str =
+    "Save or discard the edited scan notes before printing or exporting.";
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default)]
@@ -15,7 +17,7 @@ pub(super) struct Notes {
 }
 
 impl Notes {
-    fn validate(&self) -> Result<(), String> {
+    pub(super) fn validate(&self) -> Result<(), String> {
         if self.work_order.chars().count() > WORK_ORDER_LIMIT
             || self.work_order.chars().any(char::is_control)
         {
@@ -42,6 +44,9 @@ fn notes_path(scan: &Path) -> PathBuf {
 }
 
 pub(super) fn load(scan: &Path) -> Result<Notes, String> {
+    if scan_file::is_scan_file(scan) {
+        return Ok(scan_file::File::<serde::de::IgnoredAny>::load(scan)?.notes);
+    }
     match read_json::<Notes>(&notes_path(scan)) {
         Ok(notes) => {
             notes.validate()?;
@@ -73,14 +78,27 @@ pub(super) fn save(scan: &Path, expected: &Notes, draft: &Notes) -> Result<Notes
             error.to_string()
         }
     })?;
-    let current = load(scan)?;
-    if &current != expected && current != notes {
-        return Err("These notes changed in another window. Discard edits to reload the saved version. Copy any draft text you want to keep first.".into());
+    if scan_file::is_scan_file(scan) {
+        let file = scan_file::File::<super::Snapshot>::load(scan)?;
+        check_edit(&file.notes, expected, &notes)?;
+        if file.notes != notes {
+            scan_file::write(scan, &file.scan, &notes, true).map_err(|error| error.to_string())?;
+        }
+        return Ok(notes);
     }
+    let current = load(scan)?;
+    check_edit(&current, expected, &notes)?;
     if current != notes {
         save_json(&notes_path(scan), &notes)?;
     }
     Ok(notes)
+}
+
+fn check_edit(current: &Notes, expected: &Notes, notes: &Notes) -> Result<(), String> {
+    if current != expected && current != notes {
+        return Err("These notes changed in another window. Discard edits to reload the saved version. Copy any draft text you want to keep first.".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

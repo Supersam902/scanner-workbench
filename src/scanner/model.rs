@@ -7,7 +7,6 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use super::elm::ElmConnection;
 pub use super::emissions_scan::Scan as EmissionsScan;
@@ -213,42 +212,65 @@ pub fn load_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<T, String> {
     read_json(path).map_err(|error| error.to_string())
 }
 pub fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let data = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+    write_json(path, value, true).map_err(|error| error.to_string())
+}
+
+pub(super) fn write_json<T: Serialize>(path: &Path, value: &T, replace: bool) -> io::Result<()> {
+    let data = serde_json::to_vec(value)?;
     if data.len() as u64 > MAX_FILE_BYTES {
-        return Err("Save exceeds 64 MiB".into());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Save exceeds 64 MiB",
+        ));
     }
-    write_file(path, |file| file.write_all(&data)).map_err(|e| e.to_string())
+    write_file_with(path, replace, |file| file.write_all(&data))
 }
 
 pub(super) fn write_file(
     path: &Path,
     write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
 ) -> io::Result<()> {
-    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    write_file_with(path, true, write)
+}
+
+fn write_file_with(
+    path: &Path,
+    replace: bool,
+    write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>,
+) -> io::Result<()> {
     let parent = path
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
-    let (temp, file) = loop {
-        let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-        let temp = parent.join(format!(".scanner-{}-{serial}.tmp", std::process::id()));
-        match OpenOptions::new().write(true).create_new(true).open(&temp) {
-            Ok(file) => break (temp, file),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
+    #[cfg(windows)]
+    let (parent, path) = {
+        // Canonical paths keep the Win32 move used by the temporary file compatible with long paths.
+        let parent = std::fs::canonicalize(parent)?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Expected a file name"))?;
+        let path = parent.join(name);
+        (parent, path)
     };
-    let mut file = BufWriter::new(file);
-    let result = write(&mut file)
-        .and_then(|_| file.flush())
-        .and_then(|_| file.get_ref().sync_all());
-    drop(file);
-    let result = result.and_then(|_| std::fs::rename(&temp, path));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+    #[cfg(windows)]
+    let parent = parent.as_path();
+    let (file, temporary) = tempfile::Builder::new()
+        .prefix(".scanner-")
+        .suffix(".tmp")
+        .tempfile_in(parent)?
+        .into_parts();
+    let mut writer = BufWriter::new(file);
+    write(&mut writer)?;
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
+    drop(writer);
+    if replace {
+        temporary.persist(path)?;
+    } else {
+        temporary.persist_noclobber(path)?;
     }
-    result
+    Ok(())
 }
 pub fn data_directory() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
@@ -458,21 +480,8 @@ impl Capture {
                     return Err("Invalid replacement batch".into());
                 }
             }
-            for r in &sample.rows {
-                if r.source.is_some_and(|s| s > 0x1fffffff)
-                    || r.name.len() > 32768
-                    || r.value.len() > 8192
-                    || r.raw.len() > 32768
-                    || r.status.len() > 8192
-                    || r.unit.len() > 256
-                    || r.request.len() > 32
-                    || r.request.len() < 2
-                    || r.request.len() % 2 != 0
-                    || !r.request.bytes().all(|b| b.is_ascii_hexdigit())
-                    || r.numeric.is_some_and(|n| !n.is_finite())
-                {
-                    return Err("Invalid recording field".into());
-                }
+            if sample.rows.iter().any(|row| !valid_recorded_reading(row)) {
+                return Err("Invalid recording field".into());
             }
         }
         let mut previous = None;
@@ -530,7 +539,20 @@ impl Capture {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) fn valid_recorded_reading(row: &Reading) -> bool {
+    row.source.is_none_or(|source| source <= 0x1fff_ffff)
+        && row.name.len() <= 32768
+        && row.value.len() <= 8192
+        && row.raw.len() <= 32768
+        && row.status.len() <= 8192
+        && row.unit.len() <= 256
+        && (2..=32).contains(&row.request.len())
+        && row.request.len() % 2 == 0
+        && row.request.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && row.numeric.is_none_or(f64::is_finite)
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stamped {
     pub reading: Reading,
     pub at_ms: u64,
@@ -865,7 +887,7 @@ pub(super) fn vehicle_vins<'a>(rows: impl Iterator<Item = &'a Stamped>) -> (Opti
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub vehicle: Vehicle,
     pub demo: bool,

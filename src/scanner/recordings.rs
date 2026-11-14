@@ -147,72 +147,12 @@ pub(super) fn recording_label(path: &Path) -> String {
 
 #[cfg(windows)]
 pub(super) fn pick_recording(directory: &Path, save: bool) -> Result<Option<PathBuf>, String> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use std::ptr::null;
-    use windows_sys::Win32::UI::Controls::Dialogs::*;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
-
-    let mut file = vec![0u16; 32768];
-    let current_dir = std::env::current_dir().map_err(|error| error.to_string())?;
-    let filter: Vec<_> = "Scanner recordings (*.json)\0*.json\0\0"
-        .encode_utf16()
-        .collect();
-    let extension: Vec<_> = "json\0".encode_utf16().collect();
-    let initial: Vec<_> = directory.as_os_str().encode_wide().chain([0]).collect();
-    let mut dialog = OPENFILENAMEW {
-        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
-        // The button is handled on the scanner window's UI thread.
-        hwndOwner: unsafe { GetActiveWindow() },
-        lpstrFilter: filter.as_ptr(),
-        nFilterIndex: 1,
-        lpstrFile: file.as_mut_ptr(),
-        nMaxFile: file.len() as u32,
-        lpstrInitialDir: if directory.is_dir() {
-            initial.as_ptr()
-        } else {
-            null()
-        },
-        lpstrDefExt: extension.as_ptr(),
-        Flags: OFN_EXPLORER
-            | OFN_NOCHANGEDIR
-            | OFN_DONTADDTORECENT
-            | OFN_PATHMUSTEXIST
-            | if save {
-                OFN_OVERWRITEPROMPT
-            } else {
-                OFN_FILEMUSTEXIST | OFN_HIDEREADONLY
-            },
-        ..Default::default()
-    };
-    // The strings and writable file buffer remain alive until the dialog returns.
-    let selected = unsafe {
-        if save {
-            GetSaveFileNameW(&mut dialog)
-        } else {
-            GetOpenFileNameW(&mut dialog)
-        }
-    };
-    let error = if selected == 0 {
-        unsafe { CommDlgExtendedError() }
-    } else {
-        0
-    };
-    // GetOpenFileName can change the process directory despite OFN_NOCHANGEDIR.
-    if std::env::current_dir().ok().as_ref() != Some(&current_dir) {
-        std::env::set_current_dir(current_dir).map_err(|error| error.to_string())?;
-    }
-    if selected != 0 {
-        let end = file.iter().position(|&c| c == 0).unwrap_or(file.len());
-        return Ok(Some(PathBuf::from(OsString::from_wide(&file[..end]))));
-    }
-    if error == 0 {
-        Ok(None)
-    } else {
-        Err(format!(
-            "Windows could not open the file picker ({error:#X})."
-        ))
-    }
+    super::file_picker::pick(
+        directory,
+        "Scanner recordings (*.json)\0*.json\0\0",
+        "json",
+        save.then_some(std::ffi::OsStr::new("")),
+    )
 }
 
 pub(super) fn save_csv(path: &Path, capture: &Capture) -> io::Result<()> {

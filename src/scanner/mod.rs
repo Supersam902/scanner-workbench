@@ -6,6 +6,8 @@ mod connection_report;
 pub mod driver;
 mod elm;
 mod emissions_scan;
+#[cfg(windows)]
+mod file_picker;
 mod freeze_frames;
 mod graphs;
 mod live_presets;
@@ -16,6 +18,7 @@ mod recordings;
 mod replay_graphs;
 mod report_sections;
 mod scan_comparison;
+mod scan_file;
 mod scan_history;
 mod scan_notes;
 mod scan_review;
@@ -239,6 +242,8 @@ pub struct Workbench {
     scan_history: scan_history::History,
     scan_review: Option<scan_review::Review>,
     scan_recovery_dir: String,
+    #[cfg(not(windows))]
+    scan_transfer_path: String,
     monitor_support: Option<PidSupport>,
     oxygen_support: worker::OxygenCoverage,
     vehicle_info_support: Option<PidSupport>,
@@ -441,6 +446,8 @@ impl Workbench {
             scan_history: Default::default(),
             scan_review: None,
             scan_recovery_dir: String::new(),
+            #[cfg(not(windows))]
+            scan_transfer_path: String::new(),
             monitor_support: None,
             oxygen_support: Default::default(),
             vehicle_info_support: None,
@@ -1803,6 +1810,40 @@ impl Workbench {
         let (path, snapshot) = self.scan_history.selected.as_ref()?;
         let result = self.save_scan_report(snapshot, Some(path));
         self.report_saved(result)
+    }
+
+    fn import_scan_file(&mut self, path: &Path) {
+        self.status = match self.scan_history.import(path, &self.root.join("scans")) {
+            Ok(true) => "Scan imported into Scan history.".into(),
+            Ok(false) => "This scan is already in Scan history. Existing scan selected.".into(),
+            Err(error) => format!("Could not import the scan. {error}"),
+        };
+    }
+
+    fn export_scan_file(&mut self, path: PathBuf, replace: bool) {
+        if self
+            .scan_history
+            .selected
+            .as_ref()
+            .is_some_and(|(source, _)| {
+                self.scan_review
+                    .as_ref()
+                    .is_some_and(|review| review.has_unsaved_notes_for(source))
+            })
+        {
+            self.status = scan_notes::UNSAVED_MESSAGE.into();
+            return;
+        }
+        match self
+            .scan_history
+            .export(path, replace, &self.root.join("scans"))
+        {
+            Ok(path) => {
+                self.status = format!("Scan exported to {}", path.display());
+                self.last_export = Some(path);
+            }
+            Err(error) => self.status = format!("Could not export the scan. {error}"),
+        }
     }
 
     fn save_scan_report(

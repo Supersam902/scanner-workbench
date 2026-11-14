@@ -24,7 +24,7 @@ Check that the adapter supports your vehicle's protocol. Workbench supports ISO 
 - **Overview** runs an emissions scan with stored, pending and permanent codes, readiness since clear and this drive cycle, VIN, and freeze frame.
 - **Live data** shows supported PIDs with graphs and recordings. Save named PID selections from **Presets** and review readings before and after a marked event in a saved recording. The header displays DLC voltage and a click-to-copy VIN.
 - **Trouble codes** can save a before-clear scan, confirm an emissions clear and save a follow-up scan. Scan history can compare scans that match the same vehicle.
-- **Reports** opens a print-ready scan report. Add a work order and technician notes from **Scan review → Notes**. Recordings also export to CSV.
+- **Reports** opens a print-ready scan report. Add a work order and technician notes from **Scan review → Notes**. Use **Export scan** and **Import scan** in Scan history to transfer a saved scan and notes in one file. Recordings also export to CSV.
 
 The installer checks the public GitHub release feed. Open **Connection → Updates** to check for an update or restart into a staged version. Vehicle data stays in `%LOCALAPPDATA%/ScannerWorkbench`.
 

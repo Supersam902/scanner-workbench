@@ -3109,6 +3109,15 @@ impl Workbench {
 
     fn scan_history(&mut self, ui: &mut egui::Ui) {
         let dir = self.root.join("scans");
+        #[cfg(not(windows))]
+        ui.add(
+            egui::TextEdit::singleline(&mut self.scan_transfer_path)
+                .desired_width(300.0)
+                .hint_text("Path to import or export a scan file"),
+        );
+        #[cfg(not(windows))]
+        let transfer_path = (!self.scan_transfer_path.trim().is_empty())
+            .then(|| PathBuf::from(self.scan_transfer_path.trim()));
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.scan_history.search)
@@ -3117,6 +3126,22 @@ impl Workbench {
             );
             if self.scan_history.entries.is_none() || ui.button("Refresh scans").clicked() {
                 self.scan_history.refresh(&dir);
+            }
+            #[cfg(windows)]
+            if ui.button("Import scan…").clicked() {
+                match super::file_picker::pick(&self.root, scan_file::FILTER, "", None) {
+                    Ok(Some(path)) => self.import_scan_file(&path),
+                    Ok(None) => {}
+                    Err(error) => self.status = error,
+                }
+            }
+            #[cfg(not(windows))]
+            if ui
+                .add_enabled(transfer_path.is_some(), egui::Button::new("Import scan…"))
+                .clicked()
+                && let Some(path) = transfer_path.as_deref()
+            {
+                self.import_scan_file(path);
             }
         });
         if let Some(error) = &self.scan_history.problem {
@@ -3266,7 +3291,7 @@ impl Workbench {
             return;
         };
         ui.add_space(8.0);
-        let (review, print) = card(ui, |ui| {
+        let (review, print, export) = card(ui, |ui| {
             ui.set_min_width(ui.available_width());
             let actions = ui
                 .horizontal_wrapped(|ui| {
@@ -3282,6 +3307,11 @@ impl Workbench {
                     (
                         action(ui, "Review scan", true),
                         ui.button("Print saved scan").clicked(),
+                        ui.button("Export scan…")
+                            .on_hover_text(
+                                "Save a scan file with its vehicle details and saved notes.",
+                            )
+                            .clicked(),
                     )
                 })
                 .inner;
@@ -3314,11 +3344,33 @@ impl Workbench {
         })
         .inner;
         if review {
-            self.open_scan_review(snapshot, Some(path), Page::ScanHistory);
+            self.open_scan_review(snapshot, Some(path.clone()), Page::ScanHistory);
         }
         if print {
             if let Some(path) = self.export_saved_scan() {
                 open_local(&path);
+            }
+        }
+        if export {
+            #[cfg(windows)]
+            {
+                let name = path.with_extension(scan_file::EXTENSION);
+                match super::file_picker::pick(
+                    &self.root,
+                    scan_file::SAVE_FILTER,
+                    "",
+                    name.file_name(),
+                ) {
+                    Ok(Some(path)) => self.export_scan_file(path, true),
+                    Ok(None) => {}
+                    Err(error) => self.status = error,
+                }
+            }
+            #[cfg(not(windows))]
+            if let Some(path) = transfer_path {
+                self.export_scan_file(path, false);
+            } else {
+                self.status = "Enter a file path for the exported scan.".into();
             }
         }
     }

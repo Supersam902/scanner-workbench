@@ -1623,9 +1623,11 @@ fn scan_history_keeps_original_report_after_clear_and_reopens_after_restart() {
         .collect();
     for label in [
         "Scan history",
+        "Import scan…",
         "Practice scan",
         "Review scan",
         "Print saved scan",
+        "Export scan…",
         "Readiness since clear",
     ] {
         assert!(labels.contains(label), "Missing {label}");
@@ -1827,6 +1829,120 @@ fn saved_scan_notes_print_from_overview_and_history_without_rewriting_the_captur
     reopened.scan_history.select(scan_path).unwrap();
     let printed_again = std::fs::read_to_string(reopened.export_saved_scan().unwrap()).unwrap();
     assert_eq!(printed, printed_again);
+}
+
+#[test]
+fn saved_scan_transfer_preserves_evidence_and_saved_notes() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut first = Workbench::new(folder.path().join("first"));
+    first.start_demo();
+    pump(&mut first);
+    first.read_emissions_scan();
+    pump(&mut first);
+    let (original, _) = first.latest_scan.as_ref().unwrap();
+    let original = original.clone();
+    let evidence = std::fs::read(&original).unwrap();
+    let notes = scan_notes::Notes {
+        work_order: "WO-TRANSFER & 14".into(),
+        technician: "Retest <after repair>".into(),
+    };
+    scan_notes::save(&original, &scan_notes::Notes::default(), &notes).unwrap();
+    first.scan_history.select(original.clone()).unwrap();
+
+    let without_extension = folder.path().join("emissions");
+    let exported = without_extension.with_extension("obdscan");
+    first.export_scan_file(without_extension.clone(), true);
+    assert_eq!(first.last_export.as_ref(), Some(&exported));
+    let original_export = std::fs::read(&exported).unwrap();
+    assert_eq!(std::fs::read(&original).unwrap(), evidence);
+    first.export_scan_file(without_extension, true);
+    assert!(first.status.contains("A file already exists"));
+    assert_eq!(std::fs::read(&exported).unwrap(), original_export);
+
+    let other_root = folder.path().join("other");
+    let directory = other_root.join("scans");
+    let mut other = Workbench::new(other_root.clone());
+    other.start_demo();
+    pump(&mut other);
+    let active_epoch = other.epoch;
+    let live_rows = other.results.rows.len();
+    other.scan_history.search = "No match".into();
+    other.import_scan_file(&exported);
+    assert_eq!(other.status, "Scan imported into Scan history.");
+    assert!(other.scan_history.search.is_empty());
+    assert!(other.connected && other.demo && !other.busy);
+    assert_eq!(other.epoch, active_epoch);
+    assert_eq!(other.results.rows.len(), live_rows);
+    let (local, snapshot) = other.scan_history.selected.as_ref().unwrap();
+    assert_eq!(local.parent(), Some(directory.as_path()));
+    assert_eq!(snapshot, &first.scan_history.selected.as_ref().unwrap().1);
+    let local = local.clone();
+
+    other.import_scan_file(&original);
+    assert!(other.status.contains("already in Scan history"));
+    assert_eq!(other.scan_history.selected.as_ref().unwrap().0, local);
+    assert_eq!(other.scan_history.entries.as_ref().unwrap().len(), 1);
+    other.export_scan_file(local.clone(), true);
+    assert!(other.status.contains("A file already exists"));
+
+    let updated = scan_notes::Notes {
+        work_order: "WO-UPDATED".into(),
+        ..notes.clone()
+    };
+    scan_notes::save(&local, &notes, &updated).unwrap();
+    assert_eq!(scan_notes::load(&local).unwrap(), updated);
+    assert_eq!(std::fs::read(&exported).unwrap(), original_export);
+    assert_eq!(std::fs::read(&original).unwrap(), evidence);
+    drop(other);
+
+    let mut reopened = Workbench::new(other_root);
+    reopened.scan_history.refresh(&directory);
+    let entries = reopened.scan_history.entries.as_ref().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].matches("wo-updated"));
+    reopened.scan_history.select(local).unwrap();
+    let report = std::fs::read_to_string(reopened.export_saved_scan().unwrap()).unwrap();
+    for value in [
+        "WO-UPDATED",
+        "Retest &lt;after repair&gt;",
+        "Trigger code P0133",
+    ] {
+        assert!(report.contains(value), "Missing {value}");
+    }
+
+    reopened.import_scan_file(&exported);
+    let entries = reopened.scan_history.entries.as_ref().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().any(|entry| entry.matches("wo-updated")));
+    assert!(entries.iter().any(|entry| entry.matches("wo-transfer")));
+}
+
+#[test]
+fn invalid_saved_scan_import_leaves_history_untouched() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut app = Workbench::new(folder.path().join("workbench"));
+    app.start_demo();
+    pump(&mut app);
+    app.read_emissions_scan();
+    pump(&mut app);
+    let original = app.latest_scan.as_ref().unwrap().0.clone();
+    app.scan_history.refresh(&app.root.join("scans"));
+    app.scan_history.select(original.clone()).unwrap();
+    let path = folder.path().join("invalid.OBDSCAN");
+    let snapshot = app.scan_history.selected.as_ref().unwrap().1.clone();
+    let mut file = serde_json::json!({ "version": 2, "scan": snapshot.as_ref(), "notes": {} });
+    save_json(&path, &file).unwrap();
+    app.import_scan_file(&path);
+    assert!(app.status.contains("Unsupported scan file version 2"));
+    assert_eq!(app.scan_history.selected.as_ref().unwrap().0, original);
+
+    file["version"] = 1.into();
+    file["scan"]["rows"][0]["at_ms"] = (snapshot.at_ms + 1).into();
+    save_json(&path, &file).unwrap();
+    app.import_scan_file(&path);
+    assert!(app.status.contains("outside the saved scan timeline"));
+    assert_eq!(app.scan_history.selected.as_ref().unwrap().0, original);
+    assert_eq!(app.scan_history.entries.as_ref().unwrap().len(), 1);
 }
 
 #[test]

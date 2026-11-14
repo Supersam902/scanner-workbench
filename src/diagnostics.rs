@@ -38,7 +38,7 @@ pub struct Job {
     pub allow_control: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Reading {
     pub source: Option<u32>,
     pub request: String,

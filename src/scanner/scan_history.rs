@@ -1,8 +1,11 @@
 use super::emissions_scan::{Scan, State};
-use super::model::{ClearScanStage, Snapshot, Vehicle, load_json, save_json};
+use super::model::{
+    ClearScanStage, MAX_CAPTURE_ROWS, Snapshot, Vehicle, load_json, lock_file, save_json,
+    valid_recorded_reading,
+};
 use super::recordings::recording_date;
 use super::scan_comparison::{Comparison, same_vehicle};
-use super::scan_notes;
+use super::{scan_file, scan_notes};
 use serde::Deserialize;
 use std::fs;
 use std::io;
@@ -35,7 +38,14 @@ pub(super) struct Entry {
 }
 
 impl Entry {
-    fn new(path: PathBuf, vehicle: Vehicle, demo: bool, ended_ms: u64, scan: &Scan) -> Self {
+    fn new(
+        path: PathBuf,
+        vehicle: Vehicle,
+        demo: bool,
+        ended_ms: u64,
+        scan: &Scan,
+        work_order: &str,
+    ) -> Self {
         let date = recording_date(scan.started_ms);
         let title = if demo {
             "Practice scan".into()
@@ -43,8 +53,6 @@ impl Entry {
             vehicle.label()
         };
         let stage = scan.clear_stage.map_or("", ClearScanStage::label);
-        let work_order =
-            scan_notes::load(&path).map_or_else(|_| String::new(), |notes| notes.work_order);
         let search_text = format!(
             "{date} {title} {stage} {} {}",
             vehicle.vin, vehicle.registration
@@ -115,6 +123,20 @@ fn sort(entries: &mut [Entry]) {
     });
 }
 
+fn available_path(dir: &Path, started_ms: u64, extension: &str) -> PathBuf {
+    static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let sequence = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(
+            "scan-{started_ms}-{}-{sequence}.{extension}",
+            std::process::id()
+        ));
+        if !path.exists() && !path.with_extension("notes").exists() {
+            return path;
+        }
+    }
+}
+
 impl History {
     pub(super) fn refresh(&mut self, dir: &Path) {
         self.problem = None;
@@ -136,17 +158,30 @@ impl History {
                 continue;
             };
             let path = entry.path();
-            if !path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            let portable = scan_file::is_scan_file(&path);
+            if !(portable || legacy_scan_file(&path))
                 || !entry.file_type().is_ok_and(|kind| kind.is_file())
             {
                 continue;
             }
-            let item = load_json::<Metadata>(&path).and_then(|data| {
+            let item = (|| {
+                let (data, notes) = if portable {
+                    let file = scan_file::File::<Metadata>::load(&path)?;
+                    (file.scan, file.notes)
+                } else {
+                    let notes = scan_notes::load(&path).unwrap_or_default();
+                    (load_json::<Metadata>(&path)?, notes)
+                };
                 let scan = checked_scan(Some(&data.emissions_scan), data.at_ms)?;
-                Ok(Entry::new(path, data.vehicle, data.demo, data.at_ms, scan))
-            });
+                Ok::<_, String>(Entry::new(
+                    path,
+                    data.vehicle,
+                    data.demo,
+                    data.at_ms,
+                    scan,
+                    &notes.work_order,
+                ))
+            })();
             match item {
                 Ok(entry) => entries.push(entry),
                 Err(_) => issues += 1,
@@ -164,6 +199,101 @@ impl History {
         self.comparison = None;
         self.selected = Some((path, Arc::new(snapshot)));
         Ok(())
+    }
+
+    pub(super) fn import(&mut self, source: &Path, dir: &Path) -> Result<bool, String> {
+        let (snapshot, notes) = read_import(source)?;
+        let scan = validate_snapshot(&snapshot)?;
+        fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+        let _lock = lock_file(&dir.join("import.lock")).map_err(|error| {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                "Another Workbench window is importing a scan. Try again.".into()
+            } else {
+                error.to_string()
+            }
+        })?;
+        self.refresh(dir);
+        let existing_path = self
+            .entries
+            .iter()
+            .flatten()
+            .filter(|entry| {
+                entry.started_ms == scan.started_ms
+                    && entry.ended_ms == snapshot.at_ms
+                    && entry.demo == snapshot.demo
+            })
+            .find(|entry| {
+                read_import(&entry.path).is_ok_and(|(existing, existing_notes)| {
+                    existing == snapshot && existing_notes == notes
+                })
+            })
+            .map(|entry| entry.path.clone());
+        let added = existing_path.is_none();
+        let path = match existing_path {
+            Some(path) => path,
+            None => {
+                let path = available_path(dir, scan.started_ms, scan_file::EXTENSION);
+                scan_file::write(&path, &snapshot, &notes, false)
+                    .map_err(|error| error.to_string())?;
+                if let Some(entries) = &mut self.entries {
+                    entries.push(Entry::new(
+                        path.clone(),
+                        snapshot.vehicle.clone(),
+                        snapshot.demo,
+                        snapshot.at_ms,
+                        scan,
+                        &notes.work_order,
+                    ));
+                    sort(entries);
+                }
+                path
+            }
+        };
+        let search = self.search.trim().to_lowercase();
+        if !self
+            .entries
+            .iter()
+            .flatten()
+            .any(|entry| entry.path == path && entry.matches(&search))
+        {
+            self.search.clear();
+        }
+        self.comparison = None;
+        self.selected = Some((path, Arc::new(snapshot)));
+        Ok(added)
+    }
+
+    pub(super) fn export(
+        &self,
+        mut destination: PathBuf,
+        replace: bool,
+        directory: &Path,
+    ) -> Result<PathBuf, String> {
+        let missing_extension = destination.extension().is_none();
+        if missing_extension {
+            destination.set_extension(scan_file::EXTENSION);
+        } else if !scan_file::is_scan_file(&destination) {
+            return Err("Use an .obdscan extension for the exported scan.".into());
+        }
+        let (source, snapshot) = self.selected.as_ref().ok_or("Choose a saved scan first.")?;
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let inside_history = parent == directory
+            || fs::canonicalize(directory)
+                .is_ok_and(|scans| fs::canonicalize(parent).is_ok_and(|parent| parent == scans));
+        // The Save As prompt confirms only the chosen path. Appending an extension may target a different file.
+        let replace = replace && !missing_extension && !inside_history;
+        let notes = scan_notes::load(source)?;
+        scan_file::write(&destination, snapshot, &notes, replace).map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                "A file already exists at that path. Choose a new name.".into()
+            } else {
+                error.to_string()
+            }
+        })?;
+        Ok(destination)
     }
 
     pub(super) fn record_work_order(&mut self, path: &Path, work_order: &str) {
@@ -195,18 +325,7 @@ impl History {
             .emissions_scan
             .as_ref()
             .expect("only captured emissions scans are archived");
-        static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
-        let path = loop {
-            let sequence = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
-            let path = dir.join(format!(
-                "scan-{}-{}-{sequence}.json",
-                scan.started_ms,
-                std::process::id()
-            ));
-            if !path.exists() {
-                break path;
-            }
-        };
+        let path = available_path(dir, scan.started_ms, "json");
         self.pending.push(Pending {
             path: path.clone(),
             snapshot,
@@ -257,6 +376,7 @@ impl History {
                             pending.snapshot.demo,
                             pending.snapshot.at_ms,
                             scan,
+                            "",
                         ));
                     }
                 }
@@ -273,8 +393,37 @@ impl History {
     }
 }
 
+fn legacy_scan_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+}
+
 fn read_snapshot(path: &Path) -> Result<Snapshot, String> {
-    let snapshot = load_json::<Snapshot>(path)?;
+    let snapshot = if scan_file::is_scan_file(path) {
+        scan_file::File::<Snapshot>::load(path)?.scan
+    } else {
+        read_legacy_scan(path)?
+    };
+    check_timeline(&snapshot)?;
+    Ok(snapshot)
+}
+
+fn read_import(path: &Path) -> Result<(Snapshot, scan_notes::Notes), String> {
+    if scan_file::is_scan_file(path) {
+        let file = scan_file::File::<Snapshot>::load(path)?;
+        return Ok((file.scan, file.notes));
+    }
+    Ok((read_legacy_scan(path)?, scan_notes::load(path)?))
+}
+
+fn read_legacy_scan(path: &Path) -> Result<Snapshot, String> {
+    if !legacy_scan_file(path) {
+        return Err("Choose a Workbench .obdscan file or a saved scan .json file.".into());
+    }
+    load_json(path)
+}
+
+fn check_timeline(snapshot: &Snapshot) -> Result<&Scan, String> {
     let scan = checked_scan(snapshot.emissions_scan.as_ref(), snapshot.at_ms)?;
     if snapshot
         .rows
@@ -284,5 +433,22 @@ fn read_snapshot(path: &Path) -> Result<Snapshot, String> {
     {
         return Err("A reading falls outside the saved scan timeline.".into());
     }
-    Ok(snapshot)
+    Ok(scan)
+}
+
+fn validate_snapshot(snapshot: &Snapshot) -> Result<&Scan, String> {
+    let scan = check_timeline(snapshot)?;
+    if scan.ended_ms.is_some_and(|end| end != snapshot.at_ms) {
+        return Err("The saved scan and its readings have different end times.".into());
+    }
+    if snapshot.rows.len().saturating_add(snapshot.failures.len()) > MAX_CAPTURE_ROWS
+        || snapshot
+            .rows
+            .iter()
+            .chain(&snapshot.failures)
+            .any(|row| !valid_recorded_reading(&row.reading))
+    {
+        return Err("The scan contains invalid or oversized readings.".into());
+    }
+    Ok(scan)
 }
