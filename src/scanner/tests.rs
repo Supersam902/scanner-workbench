@@ -353,6 +353,122 @@ fn recording_preview_and_full_csv_leave_the_vehicle_session_available() {
 }
 
 #[test]
+fn recorded_event_markers_survive_saving_and_jump_to_their_exact_readings() {
+    let root = temp("recording-markers");
+    let mut app = Workbench::new(root.clone());
+    app.start_demo();
+    pump(&mut app);
+    app.start_recording();
+    let start = app.recording.as_ref().unwrap().started_ms;
+    app.apply_sample(sample(start + 100, "800", Some(800.0)));
+    app.marker_note = "  =check, \"intermittent\"  ".into();
+    app.mark_recording();
+    assert!(app.marker_note.is_empty());
+    let first = app.recording.as_ref().unwrap().markers[0].at_ms;
+    app.apply_sample(sample(first + 100, "900", Some(900.0)));
+    app.mark_recording();
+    assert!(app.connected && !app.busy);
+    app.finish_recording();
+
+    let path = app.saved_recordings[0].path.clone();
+    let capture = recordings::Preview::open(path.clone()).unwrap().capture;
+    assert_eq!(capture.markers.len(), 2);
+    assert_eq!(capture.markers[0].note, "=check, \"intermittent\"");
+    assert!(capture.markers[1].note.is_empty());
+    let last = capture.markers[1].at_ms;
+    assert_eq!(capture.end_ms(), last);
+    let csv = root.join("markers.csv");
+    recordings::save_csv(&csv, &capture).unwrap();
+    let csv = std::fs::read_to_string(csv).unwrap();
+    let rows: Vec<_> = csv.lines().skip(1).collect();
+    assert_eq!(rows.len(), 4);
+    assert!(rows[0].contains("\"Reading\""));
+    assert!(
+        rows[1].contains("\"Marker\",\"\",\"\",\"Event marker\",\"'=check, \"\"intermittent\"\"\"")
+    );
+    assert!(rows[2].contains("\"Reading\""));
+    assert!(rows[3].starts_with(&format!("{},", last - start)));
+    assert!(rows[3].contains("\"Marker\""));
+
+    app.open_recording(path);
+    pump(&mut app);
+    app.page = Page::Live;
+    let ctx = render_context();
+    let draw = |app: &mut Workbench, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    };
+    let click = |app: &mut Workbench, label| {
+        let output = draw(app, vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == label => {
+                    let rect = text.visual_bounding_rect();
+                    shape
+                        .clip_rect
+                        .expand(1.0)
+                        .contains_rect(rect)
+                        .then_some(rect.center())
+                }
+                _ => None,
+            })
+            .expect("marker navigation button is visible");
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        draw(app, vec![egui::Event::PointerMoved(pos), button(true)]);
+        draw(app, vec![button(false)]);
+    };
+    let engine_rpm = |app: &Workbench| {
+        app.results
+            .rows
+            .values()
+            .next()
+            .unwrap()
+            .latest
+            .reading
+            .numeric
+    };
+    app.replay_playing = true;
+    click(&mut app, "Next marker");
+    assert!(!app.replay_playing);
+    assert_eq!(app.replay_at, first);
+    assert_eq!(engine_rpm(&app), Some(800.0));
+    click(&mut app, "Next marker");
+    assert_eq!(app.replay_at, last);
+    assert_eq!(engine_rpm(&app), Some(900.0));
+    click(&mut app, "Previous marker");
+    assert_eq!(app.replay_at, first);
+    assert_eq!(app.replay_index, 1);
+    assert_eq!(engine_rpm(&app), Some(800.0));
+
+    app.start_demo();
+    pump(&mut app);
+    app.start_recording();
+    app.mark_recording();
+    app.finish_recording();
+    assert_eq!(app.saved_recordings.len(), 2);
+    let mark_only = &app.recording_preview.as_ref().unwrap().capture;
+    assert_eq!(mark_only.row_count(), 0);
+    assert_eq!(mark_only.markers.len(), 1);
+    mark_only.validate().unwrap();
+}
+
+#[test]
 fn failed_exports_preserve_the_existing_file() {
     let root = temp("atomic-write");
     let path = root.join("capture.csv");

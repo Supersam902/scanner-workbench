@@ -1514,6 +1514,8 @@ impl Workbench {
 
         if replay {
             self.replay_timeline(ui, "live_replay");
+        } else {
+            self.recording_mark_controls(ui);
         }
         if !replay {
             self.live_selection(ui, read_count);
@@ -2334,6 +2336,37 @@ impl Workbench {
                 });
         });
     }
+    fn recording_mark_controls(&mut self, ui: &mut egui::Ui) {
+        let Some(capture) = &self.recording else {
+            return;
+        };
+        let count = capture.markers.len();
+        ui.horizontal_wrapped(|ui| {
+            let enabled = count < MAX_RECORDING_MARKERS;
+            let mark = ui
+                .add_enabled(enabled, egui::Button::new("Mark event"))
+                .on_hover_text("Add a marker at the current recording time")
+                .on_disabled_hover_text("This recording has reached its marker limit.")
+                .clicked();
+            ui.add_enabled(
+                enabled,
+                egui::TextEdit::singleline(&mut self.marker_note)
+                    .desired_width(210.0)
+                    .char_limit(MAX_MARKER_NOTE_CHARS)
+                    .hint_text("Optional marker note"),
+            );
+            if mark {
+                self.mark_recording();
+            }
+            if count > 0 {
+                caption(
+                    ui,
+                    &format!("{count} {}", if count == 1 { "marker" } else { "markers" }),
+                );
+            }
+        });
+    }
+
     fn replay_timeline(&mut self, ui: &mut egui::Ui, id: &'static str) {
         let Some(capture) = &self.playback else {
             return;
@@ -2378,7 +2411,82 @@ impl Workbench {
                 }
                 caption(ui, &format!("of {duration:.1} s"));
             });
+            self.replay_markers(ui);
         });
+    }
+
+    fn replay_markers(&mut self, ui: &mut egui::Ui) {
+        let Some(capture) = &self.playback else {
+            return;
+        };
+        if capture.markers.is_empty() {
+            return;
+        }
+        let at = self.replay_at;
+        let index = capture.markers.partition_point(|marker| marker.at_ms < at);
+        let current = capture
+            .markers
+            .get(index)
+            .filter(|marker| marker.at_ms == at);
+        let next = index + usize::from(current.is_some());
+        let mut jump = None;
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(index > 0, egui::Button::new("Previous marker"))
+                .clicked()
+            {
+                jump = Some(capture.markers[index - 1].at_ms);
+            }
+            egui::ComboBox::from_id_salt("recording_markers")
+                .selected_text(if current.is_some() {
+                    format!("Marker {} of {}", index + 1, capture.markers.len())
+                } else {
+                    format!("Markers ({})", capture.markers.len())
+                })
+                .width(135.0)
+                .height(220.0)
+                .show_ui(ui, |ui| {
+                    ui.set_max_width(320.0);
+                    for (index, marker) in capture.markers.iter().enumerate() {
+                        let mut label = format!(
+                            "{}. {}",
+                            index + 1,
+                            recordings::marker_position(marker.at_ms - capture.started_ms),
+                        );
+                        if !marker.note.is_empty() {
+                            label.push_str(" · ");
+                            label.push_str(&marker.note);
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(&label)
+                                    .selected(marker.at_ms == at)
+                                    .truncate(),
+                            )
+                            .on_hover_text(&label)
+                            .clicked()
+                        {
+                            jump = Some(marker.at_ms);
+                        }
+                    }
+                });
+            if ui
+                .add_enabled(
+                    next < capture.markers.len(),
+                    egui::Button::new("Next marker"),
+                )
+                .clicked()
+            {
+                jump = Some(capture.markers[next].at_ms);
+            }
+        });
+        if let Some(marker) = current.filter(|marker| !marker.note.is_empty()) {
+            caption(ui, &marker.note);
+        }
+        if let Some(at) = jump {
+            self.replay_playing = false;
+            self.seek_replay(at);
+        }
     }
 
     fn recordings(&mut self, ui: &mut egui::Ui) {
@@ -2451,6 +2559,7 @@ impl Workbench {
         if self.recording.is_some() {
             ui.colored_label(RED, format!("{} readings recorded", self.recording_rows));
         }
+        self.recording_mark_controls(ui);
         if self.playback.is_some() {
             ui.add_space(12.0);
             let (close, export) = card(ui, |ui| {
@@ -2518,10 +2627,23 @@ impl Workbench {
                 if preview.issues > 0 {
                     ui.colored_label(AMBER, format!("{} read issues", preview.issues));
                 }
+                let markers = capture.markers.len();
+                if markers > 0 {
+                    caption(
+                        ui,
+                        &format!(
+                            "{markers} {}",
+                            if markers == 1 { "marker" } else { "markers" }
+                        ),
+                    );
+                }
                 ui.horizontal_wrapped(|ui| {
                     play = action(ui, "Replay recording", can_replay);
                     export = ui
-                        .add_enabled(preview.readings > 0, egui::Button::new("Export full CSV"))
+                        .add_enabled(
+                            !capture.samples.is_empty() || markers > 0,
+                            egui::Button::new("Export full CSV"),
+                        )
                         .clicked();
                     if let Some(path) = self
                         .last_export

@@ -118,6 +118,12 @@ six readings by ECU. Choose a time window from 10 to 120 seconds. Hover
 over a point to see its value and age. Gaps show failed reads and pauses.
 Playback controls are also available on Live Data when a recording is open.
 
+While recording, click Mark event when the symptom occurs. For a labeled
+marker, type an optional note before clicking. In replay, choose a marker
+from the list or use Previous marker and Next marker. A jump pauses replay
+at the marker so you can inspect the recorded values. Export full CSV
+includes the markers and notes in timestamp order with the readings.
+
 In Emissions, choose Freeze frame, select a frame number and click Read
 freeze frame. The scan reads the trigger code and discovers the PIDs reported
 for that frame. Results show the trigger and captured values by ECU. Values

@@ -1,4 +1,6 @@
-use super::model::{Capture, correct_recorded_monitor, load_json, unavailable, write_file};
+use super::model::{
+    Capture, RecordingMarker, correct_recorded_monitor, load_json, unavailable, write_file,
+};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -121,6 +123,11 @@ pub(super) fn recording_date(ms: u64) -> String {
         )
 }
 
+pub(super) fn marker_position(ms: u64) -> String {
+    let seconds = ms / 1000;
+    format!("{}:{:02}.{:03}", seconds / 60, seconds % 60, ms % 1000)
+}
+
 pub(super) fn recording_label(path: &Path) -> String {
     recording_stamp(path).map_or_else(
         || {
@@ -207,6 +214,43 @@ pub(super) fn save_csv(path: &Path, capture: &Capture) -> io::Result<()> {
     write_file(path, |out| write_csv(out, capture))
 }
 
+fn csv_time(at_ms: u64, start_ms: u64) -> (String, String) {
+    let elapsed = at_ms.saturating_sub(start_ms).to_string();
+    let timestamp = i64::try_from(at_ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map_or_else(String::new, |at| {
+            at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        });
+    (elapsed, timestamp)
+}
+
+fn csv_marker(
+    out: &mut impl Write,
+    marker: &RecordingMarker,
+    start_ms: u64,
+    session: &str,
+) -> io::Result<()> {
+    let (elapsed, timestamp) = csv_time(marker.at_ms, start_ms);
+    csv_row(
+        out,
+        [
+            &elapsed,
+            &timestamp,
+            session,
+            "Marker",
+            "",
+            "",
+            "Event marker",
+            &marker.note,
+            "",
+            "",
+            "",
+            "",
+        ],
+    )
+}
+
 fn write_csv(out: &mut impl Write, capture: &Capture) -> io::Result<()> {
     // A UTF-8 BOM lets Excel identify the encoding when opening the file directly.
     out.write_all(b"\xEF\xBB\xBF")?;
@@ -214,14 +258,12 @@ fn write_csv(out: &mut impl Write, capture: &Capture) -> io::Result<()> {
         b"elapsed_ms,timestamp_utc,session,event,ecu,request,item,value,numeric,unit,status,raw_reply\r\n",
     )?;
     let session = if capture.demo { "Practice" } else { "Vehicle" };
+    let mut markers = capture.markers.iter().peekable();
     for sample in &capture.samples {
-        let elapsed = sample.at_ms.saturating_sub(capture.started_ms).to_string();
-        let timestamp = i64::try_from(sample.at_ms)
-            .ok()
-            .and_then(chrono::DateTime::from_timestamp_millis)
-            .map_or_else(String::new, |at| {
-                at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-            });
+        while let Some(marker) = markers.next_if(|marker| marker.at_ms < sample.at_ms) {
+            csv_marker(out, marker, capture.started_ms, session)?;
+        }
+        let (elapsed, timestamp) = csv_time(sample.at_ms, capture.started_ms);
         if sample.clear_requested {
             csv_row(
                 out,
@@ -306,6 +348,9 @@ fn write_csv(out: &mut impl Write, capture: &Capture) -> io::Result<()> {
                 ],
             )?;
         }
+    }
+    for marker in markers {
+        csv_marker(out, marker, capture.started_ms, session)?;
     }
     Ok(())
 }

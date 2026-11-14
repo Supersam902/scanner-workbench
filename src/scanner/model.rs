@@ -20,6 +20,9 @@ pub enum ScanEvent {
 
 pub const MAX_CAPTURE_ROWS: usize = 50_000;
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_CAPTURE_DURATION_MS: u64 = 7 * 24 * 3600 * 1000;
+pub(super) const MAX_RECORDING_MARKERS: usize = 500;
+pub(super) const MAX_MARKER_NOTE_CHARS: usize = 120;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -346,6 +349,14 @@ pub struct Sample {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emissions_scan: Option<ScanEvent>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecordingMarker {
+    pub at_ms: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Capture {
     pub version: u8,
@@ -353,6 +364,8 @@ pub struct Capture {
     pub demo: bool,
     pub started_ms: u64,
     pub samples: Vec<Sample>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<RecordingMarker>,
 }
 impl Capture {
     pub fn new(vehicle: Vehicle, demo: bool, now: u64) -> Self {
@@ -362,6 +375,7 @@ impl Capture {
             demo,
             started_ms: now,
             samples: vec![],
+            markers: vec![],
         }
     }
     pub fn row_count(&self) -> usize {
@@ -371,6 +385,7 @@ impl Capture {
         if self.version != 1
             || self.row_count() > MAX_CAPTURE_ROWS
             || self.samples.len() > MAX_CAPTURE_ROWS
+            || self.markers.len() > MAX_RECORDING_MARKERS
         {
             return Err("Unsupported or oversized recording".into());
         }
@@ -378,7 +393,7 @@ impl Capture {
         let mut scanning = false;
         for sample in &self.samples {
             if sample.at_ms < previous
-                || sample.at_ms.saturating_sub(self.started_ms) > 7 * 24 * 3600 * 1000
+                || sample.at_ms.saturating_sub(self.started_ms) > MAX_CAPTURE_DURATION_MS
             {
                 return Err("Recording timestamps are invalid".into());
             }
@@ -424,6 +439,44 @@ impl Capture {
                 }
             }
         }
+        let mut previous = None;
+        for marker in &self.markers {
+            if marker.at_ms < self.started_ms
+                || previous.is_some_and(|last| marker.at_ms <= last)
+                || marker.at_ms - self.started_ms > MAX_CAPTURE_DURATION_MS
+                || marker.note.chars().count() > MAX_MARKER_NOTE_CHARS
+                || marker.note.chars().any(char::is_control)
+            {
+                return Err("Invalid recording marker".into());
+            }
+            previous = Some(marker.at_ms);
+        }
+        Ok(())
+    }
+    pub(super) fn add_marker(&mut self, at_ms: u64, note: &str) -> Result<(), &'static str> {
+        if self.markers.len() >= MAX_RECORDING_MARKERS {
+            return Err("Recording marker limit reached.");
+        }
+        let mut at_ms = at_ms.max(self.end_ms());
+        if self
+            .markers
+            .last()
+            .is_some_and(|marker| marker.at_ms == at_ms)
+        {
+            at_ms = at_ms
+                .checked_add(1)
+                .ok_or("Recording timeline limit reached.")?;
+        }
+        if at_ms - self.started_ms > MAX_CAPTURE_DURATION_MS {
+            return Err("Recording timeline limit reached.");
+        }
+        let note = note
+            .trim()
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(MAX_MARKER_NOTE_CHARS)
+            .collect();
+        self.markers.push(RecordingMarker { at_ms, note });
         Ok(())
     }
     pub fn replay(&self, until_ms: u64) -> Results {
@@ -434,7 +487,10 @@ impl Capture {
         results
     }
     pub fn end_ms(&self) -> u64 {
-        self.samples.last().map_or(self.started_ms, |s| s.at_ms)
+        let last_sample = self.samples.last().map_or(self.started_ms, |s| s.at_ms);
+        self.markers
+            .last()
+            .map_or(last_sample, |marker| marker.at_ms.max(last_sample))
     }
 }
 

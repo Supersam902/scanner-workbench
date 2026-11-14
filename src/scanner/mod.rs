@@ -238,6 +238,7 @@ pub struct Workbench {
     base_ms: u64,
     clock: Instant,
     recording: Option<Capture>,
+    marker_note: String,
     unsaved: Option<Capture>,
     recording_rows: usize,
     playback: Option<Arc<Capture>>,
@@ -391,6 +392,7 @@ impl Workbench {
             base_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
             clock: Instant::now(),
             recording: None,
+            marker_note: String::new(),
             unsaved: None,
             recording_rows: 0,
             playback: None,
@@ -1306,13 +1308,27 @@ impl Workbench {
             return;
         }
         self.recording_rows = 0;
+        self.marker_note.clear();
         self.recording = Some(Capture::new(self.vehicle.clone(), self.demo, self.now()));
         self.status =
             "Recording incoming readings. Start live data or run a diagnostic read.".into();
     }
+    fn mark_recording(&mut self) {
+        let now = self.now();
+        if let Some(capture) = &mut self.recording {
+            match capture.add_marker(now, &self.marker_note) {
+                Ok(()) => {
+                    self.marker_note.clear();
+                    self.status = format!("Marker {} added.", capture.markers.len());
+                }
+                Err(message) => self.status = message.into(),
+            }
+        }
+    }
     fn finish_recording(&mut self) {
         if let Some(mut capture) = self.recording.take() {
             if self.recording_rows == 0
+                && capture.markers.is_empty()
                 && !capture
                     .samples
                     .iter()
