@@ -1906,7 +1906,7 @@ fn full_practice_workflow_scans_reads_records_replays_and_exports() {
     // Files are retained in the test's uniquely named temp folder for inspection.
 }
 #[test]
-fn stop_rejects_queued_old_events_and_control_confirmation() {
+fn stop_rejects_queued_old_events_and_cancels_clear_confirmation() {
     let mut app = Workbench::new(temp("epoch"));
     let id = app.epoch;
     app.confirm_clear = true;
@@ -1928,6 +1928,8 @@ fn stop_rejects_queued_old_events_and_control_confirmation() {
     app.manual = "222017".into();
     assert!(app.manual_query().is_err());
     app.manual = "0801".into();
+    assert!(app.manual_query().is_err());
+    app.manual = "0902".into();
     assert!(app.manual_query().is_ok());
     app.busy = true;
     app.stop_operation();
