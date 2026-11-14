@@ -796,17 +796,22 @@ impl Workbench {
     fn adapter_picker(&mut self, ui: &mut egui::Ui) {
         let enabled = !self.busy && (!self.connected || self.demo);
         let previous = self.adapter_kind;
+        let mut driver_selected = None;
         ui.add_enabled_ui(enabled, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Adapter type");
                 egui::ComboBox::from_id_salt("workbench_adapter_type")
-                    .width(236.0)
+                    .width(218.0)
                     .selected_text(self.adapter_kind.label())
                     .show_ui(ui, |ui| {
                         for kind in AdapterKind::ALL {
                             ui.selectable_value(&mut self.adapter_kind, kind, kind.label());
                         }
-                    });
+                    })
+                    .response
+                    .on_hover_text("Adapter type");
+                if previous == AdapterKind::J2534 && self.adapter_kind == AdapterKind::J2534 {
+                    driver_selected = self.driver_controls(ui);
+                }
             });
         });
         if previous != self.adapter_kind {
@@ -816,8 +821,11 @@ impl Workbench {
             }
         }
         if self.adapter_kind == AdapterKind::J2534 {
-            self.driver_picker(ui);
-            if self.elm_connection.is_some()
+            if let Some(driver) = driver_selected {
+                self.select_driver(driver);
+            }
+            self.driver_status(ui, enabled);
+            if (self.elm_connection.is_some() || self.settings.elm_connection.is_some())
                 && ui
                     .add_enabled(enabled, egui::Button::new("Use J2534"))
                     .clicked()
@@ -891,54 +899,50 @@ impl Workbench {
         }
     }
 
-    fn driver_picker(&mut self, ui: &mut egui::Ui) {
+    fn driver_controls(&mut self, ui: &mut egui::Ui) -> Option<Option<DriverInfo>> {
         const AUTOMATIC: &str = "Automatic";
-        let enabled = !self.busy && (!self.connected || self.demo);
         let mut change = None;
-        ui.add_enabled_ui(enabled, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let drivers = self.installed_drivers.get_or_insert_with(discover_drivers);
-                let current = self.driver_override.as_ref();
-                let installed = current.and_then(|selected| {
+        let drivers = self.installed_drivers.get_or_insert_with(discover_drivers);
+        let current = self.driver_override.as_ref();
+        let installed = current.and_then(|selected| {
+            drivers
+                .iter()
+                .find(|driver| *driver == selected)
+                .or_else(|| {
                     drivers
                         .iter()
-                        .find(|driver| *driver == selected)
-                        .or_else(|| {
-                            drivers
-                                .iter()
-                                .find(|driver| same_driver_path(&driver.path, &selected.path))
-                        })
-                });
-                ui.label("Driver");
-                egui::ComboBox::from_id_salt("scanner_driver")
-                    .width(265.0)
-                    .selected_text(
-                        installed
-                            .or(current)
-                            .map_or(AUTOMATIC, |driver| &driver.name),
-                    )
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(current.is_none(), AUTOMATIC).clicked() {
-                            change = Some(None);
-                        }
-                        for driver in drivers.iter() {
-                            if ui
-                                .selectable_label(installed == Some(driver), &driver.name)
-                                .on_hover_text(driver.path.display().to_string())
-                                .clicked()
-                            {
-                                change = Some(Some(driver.clone()));
-                            }
-                        }
-                    });
-                if ui.button("Refresh drivers").clicked() {
-                    *drivers = discover_drivers();
+                        .find(|driver| same_driver_path(&driver.path, &selected.path))
+                })
+        });
+        ui.label("Driver");
+        egui::ComboBox::from_id_salt("scanner_driver")
+            .width(230.0)
+            .selected_text(
+                installed
+                    .or(current)
+                    .map_or(AUTOMATIC, |driver| &driver.name),
+            )
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), AUTOMATIC).clicked() {
+                    change = Some(None);
+                }
+                for driver in drivers.iter() {
+                    if ui
+                        .selectable_label(installed == Some(driver), &driver.name)
+                        .on_hover_text(driver.path.display().to_string())
+                        .clicked()
+                    {
+                        change = Some(Some(driver.clone()));
+                    }
                 }
             });
-        });
-        if let Some(selected) = change {
-            self.select_driver(selected);
+        if ui.button("Refresh drivers").clicked() {
+            *drivers = discover_drivers();
         }
+        change
+    }
+
+    fn driver_status(&mut self, ui: &mut egui::Ui, enabled: bool) {
         if self.driver.is_some() {
             return;
         }
