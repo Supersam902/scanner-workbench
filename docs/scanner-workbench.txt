@@ -32,6 +32,10 @@ Windows 32-bit build, November 13, 2026, revision 26
    and freeze-frame values. Use a frame link beside a code to open the
    matching capture. Review scan is also available on Overview after a scan.
    Reviewing a scan leaves the current vehicle session available.
+   In Scan review, open Notes to add a work order and technician findings.
+   Click Save scan notes to include them in the printout. Scan history can
+   find the saved scan by work order. The notes file sits beside the scan
+   file in the scans folder, so copy both files if moving a scan to another PC.
 7. To compare results, select the later scan and choose an earlier scan for
    the same VIN or plate under Before / after. The comparison shows code
    changes by ECU and category, the check-engine light, and readiness for

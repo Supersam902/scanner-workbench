@@ -1721,6 +1721,115 @@ fn reviewing_a_saved_scan_keeps_its_evidence_and_the_current_session_separate() 
 }
 
 #[test]
+fn saved_scan_notes_print_from_overview_and_history_without_rewriting_the_capture() {
+    let root = temp("scan-notes");
+    let mut app = Workbench::new(root.clone());
+    app.start_demo();
+    pump(&mut app);
+    app.vehicle.notes = "Customer reported rough idle".into();
+    app.read_emissions_scan();
+    pump(&mut app);
+
+    let (scan_path, captured) = app.latest_scan.as_ref().unwrap().clone();
+    let evidence = std::fs::read(&scan_path).unwrap();
+    assert_eq!(
+        scan_notes::load(&scan_path).unwrap(),
+        scan_notes::Notes::default()
+    );
+    app.scan_history.refresh(&root.join("scans"));
+    app.open_scan_review(captured, Some(scan_path.clone()), Page::Home);
+
+    let ctx = render_context();
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0));
+    let draw = |app: &mut Workbench, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    };
+    let click = |app: &mut Workbench, label: &str| {
+        let output = draw(app, vec![]);
+        let pointer = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == label => {
+                    let rect = text.visual_bounding_rect();
+                    shape
+                        .clip_rect
+                        .intersect(screen)
+                        .expand(1.0)
+                        .contains_rect(rect)
+                        .then_some(rect.center())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Missing {label}"));
+        let button = |pressed| egui::Event::PointerButton {
+            pos: pointer,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        draw(app, vec![egui::Event::PointerMoved(pointer), button(true)]);
+        draw(app, vec![button(false)]);
+    };
+
+    click(&mut app, "Notes");
+    click(&mut app, "Optional reference");
+    draw(&mut app, vec![egui::Event::Text("WO-557 & A".into())]);
+    click(&mut app, "Findings, work performed, or follow-up");
+    draw(
+        &mut app,
+        vec![egui::Event::Paste(
+            "Checked & documented\n<Follow up>".into(),
+        )],
+    );
+    assert!(app.scan_review.as_ref().unwrap().has_unsaved_notes());
+    app.page = Page::Home;
+    assert!(app.export_latest_scan().is_none());
+    assert_eq!(app.status, scan_notes::UNSAVED_MESSAGE);
+    click(&mut app, "Unsaved scan notes");
+    assert_eq!(app.page, Page::ScanReview);
+    let close = render_context().run(egui::RawInput::default(), |ctx| app.prepare_to_close(ctx));
+    assert!(
+        close.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .contains(&egui::ViewportCommand::CancelClose)
+    );
+    assert!(app.scan_review.as_ref().unwrap().has_unsaved_notes());
+    click(&mut app, "Save scan notes");
+    assert!(!app.scan_review.as_ref().unwrap().has_unsaved_notes());
+    assert!(app.connected && app.demo);
+    assert_eq!(app.vehicle.notes, "Customer reported rough idle");
+    assert_eq!(std::fs::read(&scan_path).unwrap(), evidence);
+    assert!(app.scan_history.entries.as_ref().unwrap()[0].matches("wo-557"));
+
+    let printed = std::fs::read_to_string(app.export_latest_scan().unwrap()).unwrap();
+    for item in [
+        "WO-557 &amp; A",
+        "Checked &amp; documented\n&lt;Follow up&gt;",
+        "Customer reported rough idle",
+        "P0133",
+    ] {
+        assert!(printed.contains(item), "Missing {item}");
+    }
+    drop(app);
+    let mut reopened = Workbench::new(root.clone());
+    reopened.scan_history.refresh(&root.join("scans"));
+    let entries = reopened.scan_history.entries.as_ref().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].matches("wo-557"));
+    reopened.scan_history.select(scan_path).unwrap();
+    let printed_again = std::fs::read_to_string(reopened.export_saved_scan().unwrap()).unwrap();
+    assert_eq!(printed, printed_again);
+}
+
+#[test]
 fn a_failed_scan_history_save_can_retry_after_more_than_one_scan() {
     let root = temp("scan-history-retry");
     std::fs::create_dir_all(&root).unwrap();

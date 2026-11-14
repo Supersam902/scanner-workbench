@@ -7,15 +7,21 @@ use super::report_sections::{
     code_results, frame_reading_qualification, frame_value, monitor_status, qualification,
     read_issues, readiness_monitors, readiness_qualification, readiness_reports, verified,
 };
+use super::scan_notes::{self, NOTES_LIMIT, Notes, UNSAVED_MESSAGE, WORK_ORDER_LIMIT};
 use super::views::{caption, card, freeze_frame_link, open_local, readiness_color};
 use super::{Page, Workbench, recordings};
 use egui::{RichText, Ui, Vec2};
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 pub(super) struct Review {
     pub(super) snapshot: Arc<Snapshot>,
     pub(super) from: Page,
+    path: Option<PathBuf>,
+    saved_notes: Option<Notes>,
+    draft_notes: Notes,
+    notes_error: Option<String>,
     section: Section,
     frame: Option<(u32, u8)>,
 }
@@ -25,21 +31,74 @@ enum Section {
     Codes,
     Readiness,
     FreezeFrame,
+    Notes,
 }
 
 impl Review {
-    pub(super) fn new(snapshot: Arc<Snapshot>, from: Page) -> Self {
-        Self {
+    pub(super) fn new(snapshot: Arc<Snapshot>, path: Option<PathBuf>, from: Page) -> Self {
+        let mut review = Self {
             snapshot,
             from,
+            path,
+            saved_notes: None,
+            draft_notes: Notes::default(),
+            notes_error: None,
             section: Section::Codes,
             frame: None,
+        };
+        review.reload_notes();
+        review
+    }
+
+    fn reload_notes(&mut self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        match scan_notes::load(path) {
+            Ok(notes) => {
+                self.draft_notes = notes.clone();
+                self.saved_notes = Some(notes);
+                self.notes_error = None;
+            }
+            Err(error) => {
+                self.saved_notes = None;
+                self.notes_error = Some(format!("Could not read saved notes. {error}"));
+            }
         }
     }
 
-    pub(super) fn show(&mut self, ui: &mut Ui, describe: impl Fn(&str) -> String) -> bool {
+    pub(super) fn has_unsaved_notes(&self) -> bool {
+        self.saved_notes
+            .as_ref()
+            .is_some_and(|saved| &self.draft_notes != saved)
+    }
+
+    pub(super) fn has_unsaved_notes_for(&self, path: &std::path::Path) -> bool {
+        self.path.as_deref() == Some(path) && self.has_unsaved_notes()
+    }
+
+    fn save_notes(&mut self) -> bool {
+        let (Some(path), Some(original)) = (&self.path, &self.saved_notes) else {
+            return false;
+        };
+        match scan_notes::save(path, original, &self.draft_notes) {
+            Ok(notes) => {
+                self.draft_notes = notes.clone();
+                self.saved_notes = Some(notes);
+                self.notes_error = None;
+                true
+            }
+            Err(error) => {
+                self.notes_error = Some(error);
+                false
+            }
+        }
+    }
+
+    pub(super) fn show(&mut self, ui: &mut Ui, describe: impl Fn(&str) -> String) -> (bool, bool) {
         let mut print = false;
-        let snapshot = &self.snapshot;
+        let mut notes_saved = false;
+        let snapshot = self.snapshot.clone();
         if let Some(scan) = &snapshot.emissions_scan {
             ui.horizontal_wrapped(|ui| {
                 ui.strong(if snapshot.demo {
@@ -52,7 +111,20 @@ impl Review {
                 if let Some(stage) = scan.clear_stage {
                     caption(ui, stage.label());
                 }
-                print = ui.button("Print scan report").clicked();
+                print = ui
+                    .add_enabled(
+                        !self.has_unsaved_notes(),
+                        egui::Button::new("Print scan report"),
+                    )
+                    .on_disabled_hover_text(UNSAVED_MESSAGE)
+                    .clicked();
+                if self.has_unsaved_notes() {
+                    notes_saved = ui.button("Save scan notes").clicked() && self.save_notes();
+                    if ui.button("Discard edits").clicked() {
+                        self.draft_notes = self.saved_notes.clone().unwrap_or_default();
+                        self.reload_notes();
+                    }
+                }
             });
         }
         ui.horizontal_wrapped(|ui| {
@@ -64,11 +136,26 @@ impl Review {
             }
         });
         ui.horizontal_wrapped(|ui| {
-            for (section, label) in [
+            let sections = [
                 (Section::Codes, "Trouble codes"),
                 (Section::Readiness, "Readiness"),
                 (Section::FreezeFrame, "Freeze frame"),
-            ] {
+                (
+                    Section::Notes,
+                    if self.has_unsaved_notes() {
+                        "Notes *"
+                    } else {
+                        "Notes"
+                    },
+                ),
+            ];
+            for (section, label) in sections {
+                if section == Section::Notes
+                    && self.path.is_none()
+                    && snapshot.vehicle.notes.trim().is_empty()
+                {
+                    continue;
+                }
                 if ui
                     .selectable_value(&mut self.section, section, label)
                     .clicked()
@@ -77,6 +164,9 @@ impl Review {
                 }
             }
         });
+        if let Some(error) = &self.notes_error {
+            ui.colored_label(AMBER, error);
+        }
         ui.separator();
         egui::ScrollArea::vertical()
             .id_salt(("scan_review", self.section, snapshot.at_ms, self.frame))
@@ -84,22 +174,73 @@ impl Review {
             .show(ui, |ui| match self.section {
                 Section::Codes => {
                     let frames = Frames::from_rows(snapshot.rows.iter().chain(&snapshot.failures));
-                    if let Some(frame) = show_codes(ui, snapshot, &frames, describe) {
+                    if let Some(frame) = show_codes(ui, &snapshot, &frames, describe) {
                         self.frame = Some(frame);
                         self.section = Section::FreezeFrame;
                         ui.ctx().request_repaint();
                     }
                 }
-                Section::Readiness => show_readiness(ui, snapshot),
+                Section::Readiness => show_readiness(ui, &snapshot),
                 Section::FreezeFrame => {
                     let frames = Frames::from_rows(snapshot.rows.iter().chain(&snapshot.failures));
                     if self.frame.is_some() && ui.link("Show all frames").clicked() {
                         self.frame = None;
                     }
-                    show_frames(ui, snapshot, frames, self.frame, describe);
+                    show_frames(ui, &snapshot, frames, self.frame, describe);
                 }
+                Section::Notes => self.notes(ui),
             });
-        print
+        (print, notes_saved)
+    }
+
+    fn notes(&mut self, ui: &mut Ui) {
+        card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 6.0;
+            if let Some(path) = &self.path {
+                let available = path.is_file();
+                if !available {
+                    ui.colored_label(
+                        AMBER,
+                        "Save this scan from Scan history before adding notes.",
+                    );
+                }
+                if self.saved_notes.is_some() && (available || self.has_unsaved_notes()) {
+                    ui.label("Work order");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.draft_notes.work_order)
+                            .id_salt(("scan_work_order", path))
+                            .char_limit(WORK_ORDER_LIMIT)
+                            .desired_width(260.0)
+                            .hint_text("Optional reference"),
+                    );
+                    ui.label("Technician notes");
+                    egui::ScrollArea::vertical()
+                        .id_salt("scan_notes_editor")
+                        .max_height(140.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.draft_notes.technician)
+                                    .id_salt(("scan_technician_notes", path))
+                                    .char_limit(NOTES_LIMIT)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(3)
+                                    .hint_text("Findings, work performed, or follow-up"),
+                            );
+                        });
+                } else if available && ui.button("Reload scan notes").clicked() {
+                    self.reload_notes();
+                }
+            }
+            if !self.snapshot.vehicle.notes.trim().is_empty() {
+                if self.path.is_some() {
+                    ui.separator();
+                }
+                ui.strong("Notes at capture");
+                ui.label(&self.snapshot.vehicle.notes);
+            }
+        });
     }
 }
 
@@ -350,13 +491,27 @@ impl Workbench {
         };
         if ui.link(back).clicked() {
             self.page = review.from;
-            self.scan_review = None;
+            if !review.has_unsaved_notes() {
+                self.scan_review = None;
+            }
             return;
+        }
+        if let Some(notes) = &review.saved_notes
+            && !notes.work_order.is_empty()
+        {
+            caption(ui, &format!("Work order {}", notes.work_order));
         }
         let snapshot = review.snapshot.clone();
         let db = &self.db;
-        if review.show(ui, |code| Self::describe_code(db, &snapshot.vehicle, code)) {
-            let result = self.save_report_html(&snapshot, None, "scan-report");
+        let (print, saved) =
+            review.show(ui, |code| Self::describe_code(db, &snapshot.vehicle, code));
+        let path = review.path.clone();
+        if saved && let (Some(path), Some(notes)) = (&path, &review.saved_notes) {
+            self.scan_history.record_work_order(path, &notes.work_order);
+            self.status = "Scan notes saved.".into();
+        }
+        if print {
+            let result = self.save_scan_report(&snapshot, path.as_deref());
             if let Some(path) = self.report_saved(result) {
                 open_local(&path);
             }

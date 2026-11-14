@@ -137,8 +137,7 @@ impl Settings {
         edit: impl FnOnce(&mut Self) -> Result<(), String>,
     ) -> Result<Self, String> {
         std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
-        // Hold the lock on a separate file so replacing settings.json keeps it locked.
-        let _lock = lock_settings(&root.join("settings.lock")).map_err(|error| {
+        let _lock = lock_file(&root.join("settings.lock")).map_err(|error| {
             if error.kind() == io::ErrorKind::WouldBlock {
                 "Another scanner is saving preferences. Try again.".into()
             } else {
@@ -153,7 +152,7 @@ impl Settings {
 }
 
 #[cfg(windows)]
-fn lock_settings(path: &Path) -> io::Result<File> {
+pub(super) fn lock_file(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
 
@@ -173,7 +172,7 @@ fn lock_settings(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(unix)]
-fn lock_settings(path: &Path) -> io::Result<File> {
+pub(super) fn lock_file(path: &Path) -> io::Result<File> {
     use std::os::fd::AsRawFd;
 
     let file = OpenOptions::new()
@@ -189,7 +188,7 @@ fn lock_settings(path: &Path) -> io::Result<File> {
     }
 }
 
-fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> io::Result<T> {
+pub(super) fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> io::Result<T> {
     let file = File::open(path)?;
     let size = file.metadata()?.len();
     if size > MAX_FILE_BYTES {
@@ -1174,9 +1173,31 @@ pub(super) fn report_with_descriptions(
     baseline: Option<&Snapshot>,
     describe: &impl Fn(&str) -> String,
 ) -> String {
+    report_with_notes(
+        snapshot,
+        baseline,
+        &super::scan_notes::Notes::default(),
+        describe,
+    )
+}
+
+pub(super) fn report_with_notes(
+    snapshot: &Snapshot,
+    baseline: Option<&Snapshot>,
+    notes: &super::scan_notes::Notes,
+    describe: &impl Fn(&str) -> String,
+) -> String {
     let mut html = printable_header("OBD-II diagnostic report");
+    let work_order = if notes.work_order.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<div><dt>Work order</dt><dd>{}</dd></div>",
+            html_escape(&notes.work_order)
+        )
+    };
     html.push_str(&format!(
-        "<header><h1>OBD-II diagnostic report</h1>{}<h2>{}</h2><dl class=\"vehicle-meta\"><div><dt>VIN</dt><dd>{}</dd></div><div><dt>Registration</dt><dd>{}</dd></div><div><dt>Odometer</dt><dd>{}</dd></div><div><dt>Scan date</dt><dd>{}</dd></div></dl></header>",
+        "<header><h1>OBD-II diagnostic report</h1>{}<h2>{}</h2><dl class=\"vehicle-meta\"><div><dt>VIN</dt><dd>{}</dd></div><div><dt>Registration</dt><dd>{}</dd></div><div><dt>Odometer</dt><dd>{}</dd></div><div><dt>Scan date</dt><dd>{}</dd></div>{work_order}</dl></header>",
         if snapshot.demo {
             "<p><strong>DEMONSTRATION DATA</strong></p>"
         } else {
@@ -1220,12 +1241,17 @@ pub(super) fn report_with_descriptions(
             "<p><strong>Latest emissions clear request</strong> &middot; {acknowledgments} ECU acknowledgments. Affected readings from before the request are historical until reread.</p>"
         ));
     }
+    if !notes.technician.is_empty() {
+        append_report_note(&mut html, "Technician notes", &notes.technician);
+    }
     super::report_sections::append(&mut html, snapshot, describe);
     if !snapshot.vehicle.notes.trim().is_empty() {
-        html.push_str(&format!(
-            "<section><h2>Technician notes</h2><p class=\"note\">{}</p></section>",
-            html_escape(&snapshot.vehicle.notes)
-        ));
+        let heading = if notes.technician.is_empty() {
+            "Technician notes"
+        } else {
+            "Notes at capture"
+        };
+        append_report_note(&mut html, heading, &snapshot.vehicle.notes);
     }
     append_scan_summary(&mut html, snapshot);
     let mut other = snapshot
@@ -1278,6 +1304,13 @@ pub(super) fn report_with_descriptions(
     }
     html.push_str("</body></html>");
     html
+}
+
+fn append_report_note(html: &mut String, heading: &str, note: &str) {
+    html.push_str(&format!(
+        "<section><h2>{heading}</h2><p class=\"note\">{}</p></section>",
+        html_escape(note)
+    ));
 }
 
 fn field_or_dash(value: &str) -> String {

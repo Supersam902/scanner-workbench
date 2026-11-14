@@ -2,6 +2,7 @@ use super::emissions_scan::{Scan, State};
 use super::model::{ClearScanStage, Snapshot, Vehicle, load_json, save_json};
 use super::recordings::recording_date;
 use super::scan_comparison::{Comparison, same_vehicle};
+use super::scan_notes;
 use serde::Deserialize;
 use std::fs;
 use std::io;
@@ -30,6 +31,7 @@ pub(super) struct Entry {
     demo: bool,
     ended_ms: u64,
     search_text: String,
+    work_order: String,
 }
 
 impl Entry {
@@ -41,6 +43,8 @@ impl Entry {
             vehicle.label()
         };
         let stage = scan.clear_stage.map_or("", ClearScanStage::label);
+        let work_order =
+            scan_notes::load(&path).map_or_else(|_| String::new(), |notes| notes.work_order);
         let search_text = format!(
             "{date} {title} {stage} {} {}",
             vehicle.vin, vehicle.registration
@@ -57,11 +61,12 @@ impl Entry {
             demo,
             ended_ms,
             search_text,
+            work_order: work_order.to_lowercase(),
         }
     }
 
     pub(super) fn matches(&self, search: &str) -> bool {
-        self.search_text.contains(search)
+        self.search_text.contains(search) || self.work_order.contains(search)
     }
 
     pub(super) fn precedes(&self, after: &Snapshot) -> bool {
@@ -161,6 +166,17 @@ impl History {
         Ok(())
     }
 
+    pub(super) fn record_work_order(&mut self, path: &Path, work_order: &str) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .flatten()
+            .find(|entry| entry.path == path)
+        {
+            entry.work_order = work_order.to_lowercase();
+        }
+    }
+
     pub(super) fn compare_with(&mut self, path: PathBuf) -> Result<(), String> {
         self.comparison = None;
         let after = &self
@@ -174,8 +190,11 @@ impl History {
         Ok(())
     }
 
-    pub(super) fn archive(&mut self, dir: &Path, snapshot: Arc<Snapshot>) -> Option<PathBuf> {
-        let scan = snapshot.emissions_scan.as_ref()?;
+    pub(super) fn archive(&mut self, dir: &Path, snapshot: Arc<Snapshot>) -> (PathBuf, bool) {
+        let scan = snapshot
+            .emissions_scan
+            .as_ref()
+            .expect("only captured emissions scans are archived");
         static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
         let path = loop {
             let sequence = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
@@ -193,11 +212,8 @@ impl History {
             snapshot,
         });
         self.retry_saves();
-        if self.pending.iter().any(|item| item.path == path) {
-            None
-        } else {
-            Some(path)
-        }
+        let saved = !self.pending.iter().any(|item| item.path == path);
+        (path, saved)
     }
 
     pub(super) fn pending_count(&self) -> usize {

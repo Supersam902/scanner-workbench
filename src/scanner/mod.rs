@@ -17,6 +17,7 @@ mod replay_graphs;
 mod report_sections;
 mod scan_comparison;
 mod scan_history;
+mod scan_notes;
 mod scan_review;
 #[cfg(test)]
 mod tests;
@@ -232,7 +233,7 @@ pub struct Workbench {
     logs: VecDeque<String>,
     results: Results,
     scanning_emissions: bool,
-    latest_scan: Option<Arc<Snapshot>>,
+    latest_scan: Option<(PathBuf, Arc<Snapshot>)>,
     before_clear_scan: Option<(PathBuf, Arc<Snapshot>)>,
     clear_baseline: Option<PathBuf>,
     scan_history: scan_history::History,
@@ -1065,9 +1066,10 @@ impl Workbench {
         let snapshot = Snapshot::from_emissions_scan(&self.vehicle, self.demo, &self.results)?;
         let stage = snapshot.emissions_scan.as_ref()?.clear_stage;
         let snapshot = Arc::new(snapshot);
-        self.latest_scan = Some(snapshot.clone());
         let directory = self.root.join("scans");
-        let path = self.scan_history.archive(&directory, snapshot.clone());
+        let (path, saved) = self.scan_history.archive(&directory, snapshot.clone());
+        self.latest_scan = Some((path.clone(), snapshot.clone()));
+        let path = saved.then_some(path);
         if let Some(error) = &self.scan_history.save_error {
             self.log(format!("Could not save the emissions scan. {error}"));
         }
@@ -1111,6 +1113,16 @@ impl Workbench {
     }
 
     fn prepare_to_close(&mut self, ctx: &egui::Context) {
+        if self
+            .scan_review
+            .as_ref()
+            .is_some_and(|review| review.has_unsaved_notes())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.page = Page::ScanReview;
+            self.status = "Save or discard the edited scan notes before closing.".into();
+            return;
+        }
         if self.scanning_emissions {
             self.cancel.store(true, Ordering::Relaxed);
             let _ = self.finish_emissions_scan(true);
@@ -1760,27 +1772,58 @@ impl Workbench {
         if self.busy {
             return None;
         }
-        let snapshot = self.latest_scan_snapshot()?;
-        let result = self.save_report_html(&snapshot, None, "scan-report");
+        let (snapshot, path) = self.latest_scan_snapshot()?;
+        let result = self.save_scan_report(&snapshot, path.as_deref());
         self.report_saved(result)
     }
-    fn latest_scan_snapshot(&self) -> Option<Arc<Snapshot>> {
-        if let Some(snapshot) = &self.latest_scan {
-            return Some(snapshot.clone());
+    fn latest_scan_snapshot(&self) -> Option<(Arc<Snapshot>, Option<PathBuf>)> {
+        if let Some((path, snapshot)) = &self.latest_scan {
+            return Some((snapshot.clone(), Some(path.clone())));
         }
         let scan = self.results.emissions_scan.as_ref()?;
         let capture = self.playback.as_ref()?;
         let results = capture.replay(scan.ended_ms?);
-        Snapshot::from_emissions_scan(&capture.vehicle, capture.demo, &results).map(Arc::new)
+        Snapshot::from_emissions_scan(&capture.vehicle, capture.demo, &results)
+            .map(|snapshot| (Arc::new(snapshot), None))
     }
-    fn open_scan_review(&mut self, snapshot: Arc<Snapshot>, from: Page) {
-        self.scan_review = Some(scan_review::Review::new(snapshot, from));
+    fn open_scan_review(&mut self, snapshot: Arc<Snapshot>, path: Option<PathBuf>, from: Page) {
+        if self
+            .scan_review
+            .as_ref()
+            .is_some_and(|review| review.has_unsaved_notes())
+        {
+            self.status = "Save or discard the edited notes before reviewing another scan.".into();
+            self.page = Page::ScanReview;
+            return;
+        }
+        self.scan_review = Some(scan_review::Review::new(snapshot, path, from));
         self.page = Page::ScanReview;
     }
     fn export_saved_scan(&mut self) -> Option<PathBuf> {
-        let snapshot = &self.scan_history.selected.as_ref()?.1;
-        let result = self.save_report_html(snapshot, None, "scan-report");
+        let (path, snapshot) = self.scan_history.selected.as_ref()?;
+        let result = self.save_scan_report(snapshot, Some(path));
         self.report_saved(result)
+    }
+
+    fn save_scan_report(
+        &self,
+        snapshot: &Snapshot,
+        path: Option<&Path>,
+    ) -> std::io::Result<PathBuf> {
+        if path.is_some_and(|path| {
+            self.scan_review
+                .as_ref()
+                .is_some_and(|review| review.has_unsaved_notes_for(path))
+        }) {
+            return Err(std::io::Error::other(scan_notes::UNSAVED_MESSAGE));
+        }
+        let notes = path.map(scan_notes::load).transpose().map_err(|error| {
+            std::io::Error::other(format!("Could not read saved scan notes. {error}"))
+        })?;
+        let html = model::report_with_notes(snapshot, None, &notes.unwrap_or_default(), &|code| {
+            self.description_for(&snapshot.vehicle, code)
+        });
+        self.write_report("scan-report", &html)
     }
     fn export_scan_comparison(&mut self) -> Option<PathBuf> {
         let snapshot = &self.scan_history.selected.as_ref()?.1;
@@ -1918,6 +1961,12 @@ impl Workbench {
     fn update_restart_blocker(&self) -> Option<&'static str> {
         if self.busy {
             Some("Wait for the current diagnostic operation to finish.")
+        } else if self
+            .scan_review
+            .as_ref()
+            .is_some_and(|review| review.has_unsaved_notes())
+        {
+            Some("Save or discard the edited scan notes before restarting.")
         } else if self.recording.is_some() || self.unsaved.is_some() {
             Some("Save the recording under Saved work before restarting.")
         } else if self.scan_history.pending_count() > 0 {

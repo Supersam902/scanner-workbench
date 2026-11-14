@@ -167,7 +167,12 @@ pub(super) fn open_local(path: &std::path::Path) {
 
 impl Workbench {
     pub(super) fn draw(&mut self, ctx: &egui::Context) {
-        if self.page != Page::ScanReview {
+        if self.page != Page::ScanReview
+            && self
+                .scan_review
+                .as_ref()
+                .is_some_and(|review| !review.has_unsaved_notes())
+        {
             self.scan_review = None;
         }
         egui::TopBottomPanel::top("scanner_header")
@@ -225,6 +230,15 @@ impl Workbench {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     for page in Page::NAVIGATION {
                         self.nav_button(ui, page);
+                    }
+                    if self.page != Page::ScanReview
+                        && self
+                            .scan_review
+                            .as_ref()
+                            .is_some_and(|review| review.has_unsaved_notes())
+                        && ui.link("Unsaved scan notes").clicked()
+                    {
+                        self.page = Page::ScanReview;
                     }
                     #[cfg(windows)]
                     if self.page != Page::Updates
@@ -595,9 +609,9 @@ impl Workbench {
                     caption(ui, &recordings::recording_date(scan.started_ms));
                     if finished {
                         if ui.button("Review scan").clicked()
-                            && let Some(snapshot) = self.latest_scan_snapshot()
+                            && let Some((snapshot, path)) = self.latest_scan_snapshot()
                         {
-                            self.open_scan_review(snapshot, Page::Home);
+                            self.open_scan_review(snapshot, path, Page::Home);
                         }
                         if ui
                             .add_enabled(!self.busy, egui::Button::new("Print scan report"))
@@ -1435,15 +1449,12 @@ impl Workbench {
             }
         });
         if !self.confirm_clear
-            && let Some(snapshot) = self
-                .before_clear_scan
-                .as_ref()
-                .map(|(_, scan)| scan.clone())
+            && let Some((path, snapshot)) = self.before_clear_scan.clone()
         {
             ui.horizontal_wrapped(|ui| {
                 caption(ui, "Before-clear scan saved");
                 if ui.link("Review before-clear scan").clicked() {
-                    self.open_scan_review(snapshot, Page::Codes);
+                    self.open_scan_review(snapshot, Some(path), Page::Codes);
                 }
             });
         }
@@ -3101,8 +3112,8 @@ impl Workbench {
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.scan_history.search)
-                    .desired_width(225.0)
-                    .hint_text("Filter vehicle, VIN, plate, date or scan stage"),
+                    .desired_width(300.0)
+                    .hint_text("Filter vehicle, VIN, plate, date or work order"),
             );
             if self.scan_history.entries.is_none() || ui.button("Refresh scans").clicked() {
                 self.scan_history.refresh(&dir);
@@ -3246,9 +3257,10 @@ impl Workbench {
             }
         }
         self.saved_scan_comparison(ui);
-        let Some((_, snapshot)) = &self.scan_history.selected else {
+        let Some((path, snapshot)) = &self.scan_history.selected else {
             return;
         };
+        let path = path.clone();
         let snapshot = snapshot.clone();
         let Some(scan) = &snapshot.emissions_scan else {
             return;
@@ -3302,7 +3314,7 @@ impl Workbench {
         })
         .inner;
         if review {
-            self.open_scan_review(snapshot, Page::ScanHistory);
+            self.open_scan_review(snapshot, Some(path), Page::ScanHistory);
         }
         if print {
             if let Some(path) = self.export_saved_scan() {
@@ -3707,13 +3719,13 @@ impl Workbench {
                     ui.set_max_width(490.0);
                     ui.label("This sends generic Mode 04. It can erase stored emissions codes and freeze-frame evidence, and reset readiness monitors. Permanent codes are not directly erased.");
                     ui.label(format!("Vehicle: {}", self.vehicle.label()));
-                    let before = self.before_clear_scan.as_ref().map(|(_, snapshot)| snapshot.clone());
+                    let before = self.before_clear_scan.clone();
                     let left_dialog = ui.horizontal_wrapped(|ui| {
-                        if let Some(snapshot) = before {
+                        if let Some((path, snapshot)) = before {
                             caption(ui, "Before-clear scan saved");
                             if ui.link("Review before-clear scan").clicked() {
                                 self.confirm_clear = false;
-                                self.open_scan_review(snapshot, Page::Codes);
+                                self.open_scan_review(snapshot, Some(path), Page::Codes);
                                 return true;
                             }
                         }
