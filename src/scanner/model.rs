@@ -550,20 +550,24 @@ pub struct GraphPoint {
     pub value: Option<f64>,
 }
 
+pub(super) type GraphObserver<'a> = dyn FnMut(&str, &Reading, GraphPoint) + 'a;
+
 impl ValueState {
-    fn push_point(&mut self, at_ms: u64, value: Option<f64>) {
+    fn push_point(&mut self, at_ms: u64, value: Option<f64>) -> Option<GraphPoint> {
         if value.is_none()
             && !self
                 .history
                 .back()
                 .is_some_and(|point| point.value.is_some())
         {
-            return;
+            return None;
         }
-        self.history.push_back(GraphPoint { at_ms, value });
+        let point = GraphPoint { at_ms, value };
+        self.history.push_back(point);
         if self.history.len() > 1200 {
             self.history.pop_front();
         }
+        Some(point)
     }
 }
 
@@ -656,15 +660,25 @@ impl Results {
     }
 
     pub fn apply(&mut self, sample: &Sample) {
+        self.apply_with_graphs(sample, None);
+    }
+
+    pub(super) fn apply_with_graphs(
+        &mut self,
+        sample: &Sample,
+        mut observe: Option<&mut GraphObserver<'_>>,
+    ) {
         self.last_sample_ms = Some(sample.at_ms);
         EmissionsScan::apply(&mut self.emissions_scan, sample);
         if sample.graph_break {
-            for row in self
-                .rows
-                .values_mut()
-                .filter(|row| graph_request(&row.latest.reading.request))
-            {
-                row.push_point(sample.at_ms, None);
+            for (key, row) in &mut self.rows {
+                let reading = &row.latest.reading;
+                if graph_request(&reading.request)
+                    && let Some(point) = row.push_point(sample.at_ms, None)
+                    && let Some(observe) = observe.as_mut()
+                {
+                    observe(key, &row.latest.reading, point);
+                }
             }
         }
         let has_outcome = sample.rows.iter().any(clear_outcome);
@@ -779,6 +793,8 @@ impl Results {
             }
             let refresh_failed =
                 failed.contains(&key) || failed.contains(&scope(r.source, &r.request));
+            let observed_key =
+                (observe.is_some() && graph_request(&r.request)).then(|| key.clone());
             let row = self.rows.entry(key).or_insert_with(|| ValueState {
                 latest: Stamped {
                     reading: r.clone(),
@@ -788,7 +804,8 @@ impl Results {
                 minimum: None,
                 maximum: None,
             });
-            if row.latest.reading.unit != r.unit && r.numeric.is_some() {
+            let unit_changed = row.latest.reading.unit != r.unit && r.numeric.is_some();
+            if unit_changed {
                 row.minimum = None;
                 row.maximum = None;
                 row.history.clear();
@@ -802,8 +819,21 @@ impl Results {
                 row.minimum = Some(row.minimum.map_or(n, |v| v.min(n)));
                 row.maximum = Some(row.maximum.map_or(n, |v| v.max(n)));
             }
-            if graph_request(&r.request) {
-                row.push_point(sample.at_ms, number);
+            if graph_request(&r.request)
+                && let Some(point) = row.push_point(sample.at_ms, number)
+                && let Some((observe, key)) = observe.as_mut().zip(observed_key.as_deref())
+            {
+                if unit_changed {
+                    observe(
+                        key,
+                        r,
+                        GraphPoint {
+                            at_ms: sample.at_ms,
+                            value: None,
+                        },
+                    );
+                }
+                observe(key, r, point);
             }
         }
         if !failed.is_empty() {
@@ -813,8 +843,10 @@ impl Results {
                         failure.at_ms == sample.at_ms
                             && refresh_failure_applies(failure, &row.latest)
                     })
+                    && let Some(point) = row.push_point(sample.at_ms, None)
+                    && let Some(observe) = observe.as_mut()
                 {
-                    row.push_point(sample.at_ms, None);
+                    observe(key, &row.latest.reading, point);
                 }
             }
         }

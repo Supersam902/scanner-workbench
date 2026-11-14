@@ -1717,22 +1717,32 @@ impl Workbench {
 
         if replay {
             self.replay_timeline(ui, "live_replay");
+            if self.graphs
+                && let Some(at) = self.replay_graphs(ui)
+            {
+                self.replay_playing = false;
+                self.seek_replay(at);
+            }
         } else {
             self.recording_mark_controls(ui);
-        }
-        if !replay {
             self.live_selection(ui, read_count);
         }
 
-        let allowed: BTreeSet<_> = self
-            .generic
-            .iter()
-            .filter(|q| self.selected.is_empty() || replay || self.selected.contains(&query_key(q)))
-            .map(|q| encode_hex(&q.bytes))
-            .collect();
+        let allowed: BTreeSet<_> = if replay {
+            BTreeSet::new()
+        } else {
+            self.generic
+                .iter()
+                .filter(|q| self.selected.is_empty() || self.selected.contains(&query_key(q)))
+                .map(|q| encode_hex(&q.bytes))
+                .collect()
+        };
         let visible = |r: &Reading| {
-            allowed.contains(&r.request)
-                || replay && matches!(r.request.get(..2), Some("21" | "22"))
+            if replay {
+                graph_request(&r.request)
+            } else {
+                allowed.contains(&r.request)
+            }
         };
         let values: Vec<_> = self
             .results
@@ -1744,7 +1754,7 @@ impl Workbench {
             caption(
                 ui,
                 if replay {
-                    "Advance the replay to see recorded values."
+                    "No live readings at the replay position."
                 } else if !self.connected {
                     "Connect to read live data."
                 } else if self.selected.is_empty() {
@@ -1756,78 +1766,25 @@ impl Workbench {
                 },
             );
         }
-        if self.graphs {
+        if self.graphs && !replay {
             let now = self.view_time();
             let choices: Vec<_> = self
                 .results
                 .rows
                 .iter()
                 .filter(|(_, value)| !value.history.is_empty())
+                .map(|(key, value)| (key.as_str(), graphs::signal_title(&value.latest.reading)))
                 .collect();
-            let automatic = || {
-                choices
-                    .iter()
-                    .filter(|(_, value)| visible(&value.latest.reading))
-                    .take(graphs::MAX_GRAPHS)
-                    .map(|(key, _)| (*key).clone())
-                    .collect()
-            };
-            let mut selected = self.graph_signals.clone().unwrap_or_else(automatic);
-            if !replay {
-                selected.retain(|key| self.results.rows.contains_key(key));
-            }
-            let mut changed = false;
-            ui.horizontal_wrapped(|ui| {
-                egui::ComboBox::from_id_salt("graph_signals")
-                    .selected_text(format!(
-                        "Signals · {}/{}",
-                        selected.len(),
-                        graphs::MAX_GRAPHS
-                    ))
-                    .width(116.0)
-                    .show_ui(ui, |ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(240.0)
-                            .show(ui, |ui| {
-                                for (key, value) in &choices {
-                                    let mut checked = selected.contains(*key);
-                                    if ui
-                                        .add_enabled(
-                                            checked || selected.len() < graphs::MAX_GRAPHS,
-                                            egui::Checkbox::new(
-                                                &mut checked,
-                                                graph_title(&value.latest.reading),
-                                            ),
-                                        )
-                                        .changed()
-                                    {
-                                        if checked {
-                                            selected.push((*key).clone());
-                                        } else {
-                                            selected.retain(|item| item != *key);
-                                        }
-                                        changed = true;
-                                    }
-                                }
-                            });
-                    });
-                if self.graph_signals.is_some() && ui.button("Reset graphs").clicked() {
-                    self.graph_signals = None;
-                    selected = automatic();
-                    changed = false;
-                }
-                egui::ComboBox::from_id_salt("graph_window")
-                    .selected_text(self.graph_window.label())
-                    .width(70.0)
-                    .show_ui(ui, |ui| {
-                        for window in graphs::Window::ALL {
-                            ui.selectable_value(&mut self.graph_window, window, window.label());
-                        }
-                    });
+            let automatic = choices.iter().filter_map(|(key, _)| {
+                visible(&self.results.rows[*key].latest.reading).then_some(*key)
             });
-            if changed {
-                self.graph_signals = Some(selected.clone());
-            }
+            let selected = graph_selection(
+                ui,
+                &choices,
+                &mut self.graph_signals,
+                &mut self.graph_window,
+                automatic,
+            );
             let values: Vec<_> = selected
                 .iter()
                 .filter_map(|key| self.results.rows.get(key))
@@ -1840,13 +1797,15 @@ impl Workbench {
                 ui.columns(columns, |columns| {
                     for (ui, value) in columns.iter_mut().zip(chunk) {
                         card(ui, |ui| {
-                            plot(
-                                ui,
-                                value,
-                                now,
-                                self.graph_window,
-                                self.results.refresh_failed(&value.latest),
-                            )
+                            let failed = self.results.refresh_failed(&value.latest);
+                            let reading = &value.latest.reading;
+                            let unit = unit_label(&reading.unit);
+                            ui.strong(graphs::signal_title(reading));
+                            graph_current(ui, Some(value), failed);
+                            let axis = graphs::TimeAxis::live(now, self.graph_window);
+                            let trace =
+                                graphs::Trace::new(&value.history, axis.start_ms, axis.end_ms);
+                            plot(ui, &trace, unit, axis, None);
                         });
                     }
                 });
@@ -1857,6 +1816,58 @@ impl Workbench {
         self.failures(ui, |r| {
             visible(r) || self.selected.is_empty() && r.request.starts_with("01")
         });
+    }
+
+    fn replay_graphs(&mut self, ui: &mut egui::Ui) -> Option<u64> {
+        let playback = self.playback.as_ref()?;
+        let signals = &playback.graphs().signals;
+        if signals.is_empty() {
+            caption(ui, "This recording has no numeric live data to graph.");
+            return None;
+        }
+        let choices: Vec<_> = signals
+            .iter()
+            .map(|(key, signal)| (key.as_str(), signal.title.as_str()))
+            .collect();
+        let selected = graph_selection(
+            ui,
+            &choices,
+            &mut self.graph_signals,
+            &mut self.graph_window,
+            choices.iter().map(|(key, _)| *key),
+        );
+        if selected.is_empty() {
+            caption(ui, "Choose signals to graph.");
+        }
+        let replay = playback.axis(self.replay_at, self.graph_window);
+        let columns = if ui.available_width() >= 670.0 { 2 } else { 1 };
+        let mut jump = None;
+        for chunk in selected.chunks(columns) {
+            ui.columns(columns, |columns| {
+                for (ui, key) in columns.iter_mut().zip(chunk) {
+                    let signal = &signals[key];
+                    let series = signal.series_at(replay.cursor_ms);
+                    card(ui, |ui| {
+                        ui.strong(&signal.title);
+                        let current = self.results.rows.get(key);
+                        let failed =
+                            current.is_some_and(|value| self.results.refresh_failed(&value.latest));
+                        graph_current(ui, current, failed);
+                        let trace = graphs::Trace::new(
+                            series.points_in(replay.axis),
+                            replay.axis.start_ms,
+                            replay.axis.end_ms,
+                        );
+                        if let Some(at) = plot(ui, &trace, &series.unit, replay.axis, Some(replay))
+                        {
+                            jump = Some(at);
+                        }
+                    });
+                }
+            });
+            ui.add_space(6.0);
+        }
+        jump
     }
 
     fn live_selection(&mut self, ui: &mut egui::Ui, read_count: usize) {
@@ -2785,14 +2796,14 @@ impl Workbench {
                     &format!(
                         "{} samples / {} readings",
                         capture.samples.len(),
-                        capture.row_count()
+                        capture.readings()
                     ),
                 );
                 actions
             })
             .inner;
             if export {
-                self.export_capture_csv(self.playback.as_ref().unwrap().clone());
+                self.export_capture_csv(self.playback.as_ref().unwrap().capture());
             }
             if close {
                 self.reset_results();
@@ -2804,6 +2815,7 @@ impl Workbench {
         let can_replay = self.recording.is_none() && self.unsaved.is_none();
         if let Some(preview) = &self.recording_preview {
             let mut play = false;
+            let mut show_graphs = false;
             let mut export = false;
             let preview_card = card(ui, |ui| {
                 ui.set_min_width(ui.available_width());
@@ -2837,6 +2849,12 @@ impl Workbench {
                 }
                 ui.horizontal_wrapped(|ui| {
                     play = action(ui, "Replay recording", can_replay);
+                    show_graphs = ui
+                        .add_enabled(
+                            can_replay && preview.has_numeric_data,
+                            egui::Button::new("Review graphs"),
+                        )
+                        .clicked();
                     export = ui
                         .add_enabled(
                             !capture.samples.is_empty() || markers > 0,
@@ -2857,8 +2875,11 @@ impl Workbench {
             if std::mem::take(&mut self.show_recording_preview) {
                 ui.scroll_to_rect(preview_card.response.rect, Some(egui::Align::Min));
             }
-            if play {
-                self.open_recording(preview.path.clone());
+            if play || show_graphs {
+                if self.open_recording(preview.path.clone()) && show_graphs {
+                    self.graphs = true;
+                    self.page = Page::Live;
+                }
             } else if export {
                 self.export_capture_csv(preview.capture.clone());
             }
@@ -3718,18 +3739,78 @@ fn reading_issue(ui: &mut egui::Ui, reading: &Reading) {
 fn is_code(request: &str) -> bool {
     codes::Category::from_request(request).is_some() || request == "1902FF"
 }
-fn graph_title(reading: &Reading) -> String {
-    match reading.source {
-        Some(source) => format!("{} · ECU {source:X}", reading.name),
-        None => reading.name.clone(),
+fn graph_selection<'a, Label: AsRef<str>>(
+    ui: &mut egui::Ui,
+    choices: &[(&str, Label)],
+    saved: &mut Option<Vec<String>>,
+    window: &mut graphs::Window,
+    automatic: impl Iterator<Item = &'a str>,
+) -> Vec<String> {
+    let automatic: Vec<_> = automatic
+        .take(graphs::MAX_GRAPHS)
+        .map(str::to_owned)
+        .collect();
+    let mut selected = saved.clone().unwrap_or_else(|| automatic.clone());
+    selected.retain(|key| choices.iter().any(|(choice, _)| key == choice));
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        egui::ComboBox::from_id_salt("graph_signals")
+            .selected_text(format!(
+                "Signals · {}/{}",
+                selected.len(),
+                graphs::MAX_GRAPHS
+            ))
+            .width(116.0)
+            .height(240.0)
+            .show_ui(ui, |ui| {
+                for (key, title) in choices {
+                    let mut checked = selected.iter().any(|item| item == key);
+                    if ui
+                        .add_enabled(
+                            checked || selected.len() < graphs::MAX_GRAPHS,
+                            egui::Checkbox::new(&mut checked, title.as_ref()),
+                        )
+                        .changed()
+                    {
+                        if checked {
+                            selected.push((*key).to_owned());
+                        } else {
+                            selected.retain(|item| item != key);
+                        }
+                        changed = true;
+                    }
+                }
+            });
+        if saved.is_some() && ui.button("Reset graphs").clicked() {
+            *saved = None;
+            selected = automatic;
+            changed = false;
+        }
+        egui::ComboBox::from_id_salt("graph_window")
+            .selected_text(window.label())
+            .width(70.0)
+            .show_ui(ui, |ui| {
+                for choice in graphs::Window::ALL {
+                    ui.selectable_value(window, choice, choice.label());
+                }
+            });
+    });
+    if changed {
+        *saved = Some(selected.clone());
     }
+    selected
 }
 
-fn plot(ui: &mut egui::Ui, value: &ValueState, now: u64, window: graphs::Window, failed: bool) {
+fn graph_current(ui: &mut egui::Ui, value: Option<&ValueState>, failed: bool) {
+    let Some(value) = value else {
+        caption(ui, "No reading at the replay position");
+        return;
+    };
     let reading = &value.latest.reading;
     let unit = unit_label(&reading.unit);
     ui.horizontal_wrapped(|ui| {
-        ui.strong(graph_title(reading));
+        let current = format!("{} {unit}", display_value(reading));
+        ui.label(RichText::new(current.trim_end()).color(if failed { AMBER } else { ACCENT }));
         if failed {
             ui.colored_label(AMBER, "Refresh failed");
         } else if value
@@ -3740,18 +3821,37 @@ fn plot(ui: &mut egui::Ui, value: &ValueState, now: u64, window: graphs::Window,
             caption(ui, "Last reading");
         }
     });
-    let current = format!("{} {unit}", display_value(reading));
-    ui.label(RichText::new(current.trim_end()).color(if failed { AMBER } else { ACCENT }));
+}
 
-    let duration = window.milliseconds();
-    let start = now.saturating_sub(duration);
-    let trace = graphs::Trace::new(value, start, now);
+fn plot(
+    ui: &mut egui::Ui,
+    trace: &graphs::Trace,
+    unit: &str,
+    axis: graphs::TimeAxis,
+    replay: Option<graphs::ReplayAxis<'_>>,
+) -> Option<u64> {
+    let clickable = replay.is_some() && axis.end_ms > axis.start_ms;
     let (area, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width().max(100.0), 108.0),
-        egui::Sense::hover(),
+        if clickable {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        },
     );
+    let response = if clickable {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    };
+    if clickable {
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Seek replay chart")
+        });
+    }
     let painter = ui.painter_at(area);
     let rect = area.shrink(4.0);
+    let x = |at_ms| egui::lerp(rect.x_range(), axis.fraction(at_ms));
     painter.rect_filled(area, 4.0, CANVAS);
     for i in 0..=4 {
         let fraction = i as f32 / 4.0;
@@ -3762,13 +3862,48 @@ fn plot(ui: &mut egui::Ui, value: &ValueState, now: u64, window: graphs::Window,
         let y = egui::lerp(rect.y_range(), i as f32 / 2.0);
         painter.hline(rect.x_range(), y, Stroke::new(1.0_f32, BORDER));
     }
+    let pointer = response.hover_pos();
+    let time_at = |pointer: egui::Pos2| axis.time_at((pointer.x - rect.left()) / rect.width());
+    let tolerance = |pixels: f32| (pixels * axis.duration() as f32 / rect.width()) as u64;
+    let marker_at = |pointer: egui::Pos2| {
+        replay.and_then(|replay| replay.marker_near(time_at(pointer), tolerance(5.0)))
+    };
+    let nearest_marker = pointer.and_then(marker_at);
+    if let Some(replay) = replay {
+        let mut last_x = f32::NEG_INFINITY;
+        for marker in replay.markers {
+            let marker_x = x(marker.at_ms);
+            if marker_x - last_x < 2.0 {
+                continue;
+            }
+            painter.vline(marker_x, rect.y_range(), Stroke::new(1.0_f32, AMBER));
+            painter.circle_filled(egui::pos2(marker_x, rect.top() + 4.0), 3.0, AMBER);
+            last_x = marker_x;
+        }
+        painter.vline(
+            x(replay.cursor_ms),
+            rect.y_range(),
+            Stroke::new(1.0_f32, INK),
+        );
+    }
+    let position_at = |at_ms| {
+        replay.map_or_else(
+            || {
+                format!(
+                    "{:.2} s ago",
+                    axis.end_ms.saturating_sub(at_ms) as f64 / 1000.0
+                )
+            },
+            |replay| recordings::marker_position(at_ms.saturating_sub(replay.started_ms)),
+        )
+    };
+    let mut tooltip = None;
     if let Some((low, high)) = trace.range {
         // Scale before subtracting so finite input never produces an infinite span.
         let scale = high.abs().max(low.abs()).max(1.0);
         let lo = low / scale;
         let span = high / scale - lo;
         let position = |point: GraphPoint| {
-            let x = 1.0 - now.saturating_sub(point.at_ms) as f32 / duration as f32;
             let y = point.value.map_or(0.5, |n| {
                 if span > 0.0 {
                     ((n / scale - lo) / span) as f32
@@ -3776,10 +3911,7 @@ fn plot(ui: &mut egui::Ui, value: &ValueState, now: u64, window: graphs::Window,
                     0.5
                 }
             });
-            egui::pos2(
-                egui::lerp(rect.x_range(), x),
-                egui::lerp(rect.y_range(), 1.0 - y),
-            )
+            egui::pos2(x(point.at_ms), egui::lerp(rect.y_range(), 1.0 - y))
         };
         for run in &trace.runs {
             if let [point] = run.as_slice() {
@@ -3791,32 +3923,65 @@ fn plot(ui: &mut egui::Ui, value: &ValueState, now: u64, window: graphs::Window,
                 ));
             }
         }
-        if let Some(pointer) = response.hover_pos() {
-            let from_right = ((rect.right() - pointer.x) / rect.width()).clamp(0.0, 1.0);
-            let cursor = now.saturating_sub((from_right * duration as f32) as u64);
-            let tolerance = (6.0 * duration as f32 / rect.width()) as u64;
+        if let Some(pointer) = pointer.filter(|_| nearest_marker.is_none()) {
+            let cursor = time_at(pointer);
             painter.vline(
                 pointer.x.clamp(rect.left(), rect.right()),
                 rect.y_range(),
                 Stroke::new(1.0_f32, MUTED),
             );
-            if let Some(point) = trace.point_near(cursor, tolerance) {
+            if let Some(point) = trace.point_near(cursor, tolerance(6.0)) {
                 painter.circle_filled(position(point), 4.0, INK);
-                let age = now.saturating_sub(point.at_ms) as f64 / 1000.0;
-                response.on_hover_text_at_pointer(format!(
-                    "{:.3} {unit}  ·  {age:.2} s ago",
-                    point.value.unwrap()
+                tooltip = Some(format!(
+                    "{:.3} {unit} · {}",
+                    point.value.unwrap(),
+                    position_at(point.at_ms)
                 ));
             } else {
-                response.on_hover_text_at_pointer("No sample at this time");
+                tooltip = Some("No sample at this time".to_owned());
             }
         }
         let range = format!("{low:.2} to {high:.2} {unit}");
-        caption(
-            ui,
-            &format!("{} · last {}", range.trim_end(), window.label()),
-        );
+        if replay.is_some() {
+            caption(ui, range.trim_end());
+        } else {
+            caption(
+                ui,
+                &format!("{} · last {} s", range.trim_end(), axis.duration() / 1000),
+            );
+        }
     } else {
         caption(ui, "No readings in this window");
     }
+    if replay.is_some() {
+        caption(
+            ui,
+            &format!(
+                "{} – {}",
+                position_at(axis.start_ms),
+                position_at(axis.end_ms)
+            ),
+        );
+    }
+    let jump = if clickable && response.clicked() {
+        Some(response.interact_pointer_pos().map_or_else(
+            || axis.time_at(0.5),
+            |pointer| marker_at(pointer).map_or_else(|| time_at(pointer), |marker| marker.at_ms),
+        ))
+    } else {
+        None
+    };
+    if let Some(marker) = nearest_marker {
+        let label = if marker.note.is_empty() {
+            "Event marker"
+        } else {
+            &marker.note
+        };
+        response.on_hover_text_at_pointer(format!("{} · {label}", position_at(marker.at_ms)));
+    } else if let Some(tooltip) = tooltip {
+        response.on_hover_text_at_pointer(tooltip);
+    } else if clickable {
+        response.on_hover_text_at_pointer("Click to move the replay cursor");
+    }
+    jump
 }

@@ -457,7 +457,7 @@ fn recording_preview_and_full_csv_leave_the_vehicle_session_available() {
     assert!(app.saved_recordings.is_empty());
     app.open_recording(path);
     assert!(Arc::ptr_eq(
-        app.playback.as_ref().unwrap(),
+        &app.playback.as_ref().unwrap().capture(),
         &app.recording_preview.as_ref().unwrap().capture,
     ));
     assert!(!app.connected);
@@ -504,9 +504,7 @@ fn recorded_event_markers_survive_saving_and_jump_to_their_exact_readings() {
     assert!(rows[3].starts_with(&format!("{},", last - start)));
     assert!(rows[3].contains("\"Marker\""));
 
-    app.open_recording(path);
-    pump(&mut app);
-    app.page = Page::Live;
+    app.page = Page::Recordings;
     let ctx = render_context();
     let draw = |app: &mut Workbench, events| {
         ctx.run(
@@ -520,6 +518,16 @@ fn recorded_event_markers_survive_saving_and_jump_to_their_exact_readings() {
             },
             |ctx| app.draw(ctx),
         )
+    };
+    let click_at = |app: &mut Workbench, pos| {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        draw(app, vec![egui::Event::PointerMoved(pos), button(true)]);
+        draw(app, vec![button(false)]);
     };
     let click = |app: &mut Workbench, label| {
         let output = draw(app, vec![]);
@@ -537,15 +545,8 @@ fn recorded_event_markers_survive_saving_and_jump_to_their_exact_readings() {
                 }
                 _ => None,
             })
-            .expect("marker navigation button is visible");
-        let button = |pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: Default::default(),
-        };
-        draw(app, vec![egui::Event::PointerMoved(pos), button(true)]);
-        draw(app, vec![button(false)]);
+            .unwrap_or_else(|| panic!("Missing replay control {label}"));
+        click_at(app, pos);
     };
     let engine_rpm = |app: &Workbench| {
         app.results
@@ -557,6 +558,37 @@ fn recorded_event_markers_survive_saving_and_jump_to_their_exact_readings() {
             .reading
             .numeric
     };
+    assert_eq!(app.recording_preview.as_ref().unwrap().path, path);
+    click(&mut app, "Review graphs");
+    assert_eq!(app.page, Page::Live);
+    assert!(app.graphs && app.playback.is_some() && !app.connected);
+    pump(&mut app);
+    assert!(app.results.rows.is_empty());
+    let find_amber_marker = |output: &egui::FullOutput| {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::LineSegment { points, stroke }
+                    if stroke.color == appearance::AMBER
+                        && points[0].x == points[1].x
+                        && (points[1].y - points[0].y - 100.0).abs() < 0.1
+                        && shape.clip_rect.contains(points[0].lerp(points[1], 0.5)) =>
+                {
+                    Some(points[0].lerp(points[1], 0.5))
+                }
+                _ => None,
+            })
+            .expect("chart shows a recording marker")
+    };
+    let marker = find_amber_marker(&draw(&mut app, vec![]));
+    app.replay_playing = true;
+    click_at(&mut app, marker);
+    assert!(!app.replay_playing);
+    assert_eq!(app.replay_at, first);
+    assert_eq!(engine_rpm(&app), Some(800.0));
+
+    app.seek_replay(start);
     app.replay_playing = true;
     click(&mut app, "Next marker");
     assert!(!app.replay_playing);
@@ -610,7 +642,7 @@ fn failed_live_reads_preserve_values_age_and_statistics() {
     assert_eq!(results.failures.len(), 1);
     results.apply(&sample(4000, "850", Some(850.0)));
     assert!(results.failures.is_empty());
-    let trace = graphs::Trace::new(results.rows.values().next().unwrap(), 0, 4000);
+    let trace = graphs::Trace::new(&results.rows.values().next().unwrap().history, 0, 4000);
     assert_eq!(trace.runs.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1]);
     assert_eq!(trace.point_near(3000, 500), None);
     assert_eq!(trace.point_near(4000, 0).unwrap().value, Some(850.0));
@@ -662,12 +694,75 @@ fn recording_graph_gaps_follow_ecu_failures_and_polling_pauses() {
     let replay: Capture = serde_json::from_slice(&serde_json::to_vec(&capture).unwrap()).unwrap();
     replay.validate().unwrap();
     let results = replay.replay(5000);
-    let a = graphs::Trace::new(&results.rows[&row_key(&first)], 0, 5000);
-    let b = graphs::Trace::new(&results.rows[&row_key(&second)], 0, 5000);
+    let a = graphs::Trace::new(&results.rows[&row_key(&first)].history, 0, 5000);
+    let b = graphs::Trace::new(&results.rows[&row_key(&second)].history, 0, 5000);
     assert_eq!(a.runs.iter().map(Vec::len).collect::<Vec<_>>(), [1, 1, 1]);
     assert_eq!(b.runs.iter().map(Vec::len).collect::<Vec<_>>(), [3, 1]);
     assert_eq!(a.point_near(4000, 500), None);
     assert_eq!(b.point_near(4000, 500), None);
+}
+
+#[test]
+fn replay_charts_keep_both_sides_of_the_cursor_and_full_recorded_history() {
+    let start = 1_000_000;
+    let mut capture = Capture::new(vehicle(), false, start);
+    capture.samples = (0..1400)
+        .map(|offset| {
+            let mut sample = sample(start + offset * 100, "800", Some(800.0));
+            if offset == 754 {
+                sample.rows[0].value = "Unavailable".into();
+                sample.rows[0].numeric = None;
+            } else if offset >= 1100 {
+                sample.rows[0].unit = "Hz".into();
+            }
+            sample
+        })
+        .collect();
+    capture.samples[758].graph_break = true;
+    let cursor = start + 75_000;
+    capture.markers.push(RecordingMarker {
+        at_ms: cursor,
+        note: "Intermittent idle".into(),
+    });
+    capture.validate().unwrap();
+    let playback = replay_graphs::ReplayCapture::new(Arc::new(capture));
+    let graphs = playback.graphs();
+    let signal = graphs.signals.values().next().unwrap();
+    let beginning = playback.axis(start, super::graphs::Window::TenSeconds);
+    assert_eq!(
+        signal.series_at(start).points_in(beginning.axis)[0].at_ms,
+        start
+    );
+    let window = playback.axis(cursor, super::graphs::Window::TenSeconds);
+    assert_eq!(window.axis.start_ms, cursor - 5000);
+    assert_eq!(window.axis.time_at(0.5), cursor);
+    assert_eq!(window.axis.end_ms, cursor + 5000);
+    assert_eq!(
+        window.marker_near(cursor + 1, 5).unwrap().note,
+        "Intermittent idle"
+    );
+    assert!(window.marker_near(cursor + 6, 5).is_none());
+    let series = signal.series_at(cursor);
+    let points = series.points_in(window.axis);
+    assert!(
+        points
+            .iter()
+            .any(|point| point.at_ms < cursor && point.value.is_some())
+    );
+    assert!(
+        points
+            .iter()
+            .any(|point| point.at_ms > cursor && point.value.is_some())
+    );
+    let trace = super::graphs::Trace::new(points, window.axis.start_ms, window.axis.end_ms);
+    assert_eq!(trace.runs.len(), 3);
+    assert_eq!(trace.point_near(start + 75_400, 0), None);
+    let at_cursor = playback.replay(cursor);
+    assert_eq!(at_cursor.rows.values().next().unwrap().latest.at_ms, cursor);
+    let ending = playback.axis(playback.end_ms(), super::graphs::Window::TenSeconds);
+    assert_eq!(ending.axis.end_ms, playback.end_ms());
+    assert_eq!(signal.series_at(ending.cursor_ms).unit, "Hz");
+    assert_eq!(series.unit, "RPM");
 }
 #[test]
 fn recording_roundtrip_replays_values_failures_and_bounds() {
@@ -1161,7 +1256,7 @@ fn freeze_frame_link_opens_the_matching_ecu_and_updates_on_replay() {
         },
     ];
     capture.validate().unwrap();
-    app.playback = Some(Arc::new(capture));
+    app.playback = Some(replay_graphs::ReplayCapture::new(Arc::new(capture)));
     app.seek_replay(1000);
     app.page = Page::Codes;
     let ctx = render_context();
@@ -2354,7 +2449,7 @@ fn playback_seek_resets_incremental_cursor_and_failed_save_retains_capture() {
         sample(1000, "800", Some(800.0)),
         sample(2000, "900", Some(900.0)),
     ];
-    app.playback = Some(Arc::new(cap.clone()));
+    app.playback = Some(replay_graphs::ReplayCapture::new(Arc::new(cap.clone())));
     app.seek_replay(2000);
     assert_eq!(app.replay_index, 2);
     app.seek_replay(1000);
@@ -2989,7 +3084,7 @@ fn every_new_page_renders_in_compact_and_large_windows() {
         ];
         app.results = capture.replay(capture.end_ms());
         app.replay_at = capture.end_ms();
-        app.playback = Some(Arc::new(capture));
+        app.playback = Some(replay_graphs::ReplayCapture::new(Arc::new(capture)));
         app.page = Page::Live;
         app.graphs = true;
         let output = ctx.run(

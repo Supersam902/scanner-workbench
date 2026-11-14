@@ -12,6 +12,7 @@ mod live_reads;
 pub mod model;
 mod readiness;
 mod recordings;
+mod replay_graphs;
 mod report_sections;
 mod scan_comparison;
 mod scan_history;
@@ -257,7 +258,7 @@ pub struct Workbench {
     marker_note: String,
     unsaved: Option<Capture>,
     recording_rows: usize,
-    playback: Option<Arc<Capture>>,
+    playback: Option<replay_graphs::ReplayCapture>,
     replay_at: u64,
     replay_index: usize,
     replay_playing: bool,
@@ -1470,21 +1471,13 @@ impl Workbench {
                 self.read_live(queries, true);
             }
         }
-        if self.replay_playing {
-            if let Some(capture) = &self.playback {
-                let advance = self.replay_tick.elapsed().as_millis() as u64;
-                self.replay_tick = Instant::now();
-                self.replay_at = (self.replay_at + advance).min(capture.end_ms());
-                while self.replay_index < capture.samples.len()
-                    && capture.samples[self.replay_index].at_ms <= self.replay_at
-                {
-                    self.results.apply(&capture.samples[self.replay_index]);
-                    self.replay_index += 1;
-                }
-                if self.replay_at >= capture.end_ms() {
-                    self.replay_playing = false;
-                }
-            }
+        if self.replay_playing
+            && let Some(end) = self.playback.as_ref().map(|capture| capture.end_ms())
+        {
+            let advance = self.replay_tick.elapsed().as_millis() as u64;
+            self.replay_tick = Instant::now();
+            self.seek_replay(self.replay_at.saturating_add(advance));
+            self.replay_playing = self.replay_at < end;
         }
     }
     fn connection_failed(&mut self, message: String) {
@@ -1622,10 +1615,10 @@ impl Workbench {
             Err(error) => self.status = format!("Could not export recording. {error}"),
         }
     }
-    fn open_recording(&mut self, path: PathBuf) {
+    fn open_recording(&mut self, path: PathBuf) -> bool {
         if self.recording.is_some() || self.unsaved.is_some() {
             self.status = "Stop and save the current recording before opening another.".into();
-            return;
+            return false;
         }
         let capture = self
             .recording_preview
@@ -1647,24 +1640,37 @@ impl Workbench {
                 self.replay_at = c.started_ms;
                 self.results = c.replay(self.replay_at);
                 self.replay_index = c.samples.partition_point(|s| s.at_ms <= self.replay_at);
-                self.playback = Some(c);
+                self.playback = Some(replay_graphs::ReplayCapture::new(c));
                 self.playback_path = Some(path);
                 self.page = Page::Recordings;
                 self.status =
                     "Offline playback loaded. Vehicle communication is disconnected.".into();
+                true
             }
-            Err(e) => self.status = format!("Cannot open recording: {e}"),
+            Err(e) => {
+                self.status = format!("Cannot open recording: {e}");
+                false
+            }
         }
     }
     fn snapshot(&self) -> Snapshot {
         Snapshot::from_results(&self.vehicle, self.demo, self.view_time(), &self.results)
     }
     fn seek_replay(&mut self, at: u64) {
-        if let Some(c) = &self.playback {
-            self.replay_at = at.clamp(c.started_ms, c.end_ms());
-            self.results = c.replay(self.replay_at);
-            self.replay_index = c.samples.partition_point(|s| s.at_ms <= self.replay_at);
+        let Some(capture) = &self.playback else {
+            return;
+        };
+        let at = at.clamp(capture.started_ms, capture.end_ms());
+        let index = capture.samples.partition_point(|s| s.at_ms <= at);
+        if index < self.replay_index {
+            self.results = Results::default();
+            self.replay_index = 0;
         }
+        for sample in &capture.samples[self.replay_index..index] {
+            self.results.apply(sample);
+        }
+        self.replay_index = index;
+        self.replay_at = at;
     }
     fn save_baseline(&mut self) {
         if self.results.rows.is_empty() {

@@ -140,8 +140,12 @@ Playback controls are also available on Live Data when a recording is open.
 While recording, click Mark event when the symptom occurs. For a labeled
 marker, type an optional note before clicking. In replay, choose a marker
 from the list or use Previous marker and Next marker. A jump pauses replay
-at the marker so you can inspect the recorded values. Export full CSV
-includes the markers and notes in timestamp order with the readings.
+at the marker. From a saved recording, choose Review graphs to see the
+readings before and after the cursor. The pale line marks the replay
+position. Amber lines mark events. Hover over a sample or marker for its
+time and details, and click a chart to move the replay cursor. The reading
+values reflect the selected time. Export full CSV includes markers and
+notes in timestamp order with the readings.
 
 In Emissions, choose Freeze frame, select a frame number and click Read
 freeze frame. The scan reads the trigger code and discovers the PIDs reported

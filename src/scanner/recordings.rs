@@ -1,5 +1,6 @@
 use super::model::{
-    Capture, RecordingMarker, correct_recorded_monitor, load_json, unavailable, write_file,
+    Capture, RecordingMarker, correct_recorded_monitor, graph_request, load_json, unavailable,
+    write_file,
 };
 use std::fs;
 use std::io::{self, Write};
@@ -11,6 +12,7 @@ pub(super) struct Preview {
     pub(super) capture: Arc<Capture>,
     pub(super) readings: usize,
     pub(super) issues: usize,
+    pub(super) has_numeric_data: bool,
 }
 
 impl Preview {
@@ -21,18 +23,21 @@ impl Preview {
     }
 
     pub(super) fn new(path: PathBuf, capture: Capture) -> Self {
-        let readings = capture.row_count();
-        let issues = capture
-            .samples
-            .iter()
-            .flat_map(|sample| &sample.rows)
-            .filter(|row| unavailable(row))
-            .count();
+        let mut readings = 0;
+        let mut issues = 0;
+        let mut has_numeric_data = false;
+        for row in capture.samples.iter().flat_map(|sample| &sample.rows) {
+            let failed = unavailable(row);
+            readings += 1;
+            issues += usize::from(failed);
+            has_numeric_data |= !failed && graph_request(&row.request) && row.numeric.is_some();
+        }
         Self {
             path,
             capture: Arc::new(capture),
             readings,
             issues,
+            has_numeric_data,
         }
     }
 }
