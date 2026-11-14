@@ -66,7 +66,11 @@ broadcast. The status line shows the
 current attempt or wait. Connection lists each driver and protocol tried
 in the latest connection check, including failures opening or setting up a
 channel, failures sending a request and requests with no verified ECU reply.
-Copy results copies the outcomes and the driver's error text.
+Copy connection report includes the app version, adapter settings, voltage
+available at Connect, and the adapter and protocol results. It also includes
+the latest Check vehicle reply result when one is available for that session.
+Driver and adapter error text is included. The app's VIN, scan records and
+log are separate from this report.
 Use the J2534 Protocol override to limit Connect to a single protocol. A known
 29-bit ECU source limits Connect to 29-bit CAN. Overrides last until the
 app closes.
@@ -83,7 +87,9 @@ clear was interrupted, read the codes and readiness again to see what the
 vehicle applied.
 
 An ELM connection needs automatic protocol detection and standard ECU
-headers. While its voltage readout is active, Workbench can hold the COM
+headers. The report distinguishes setup and protocol identification failures
+from adapter connection failures and incomplete ECU replies. While its
+voltage readout is active, Workbench can hold the COM
 port or TCP socket open. Close Workbench or choose another adapter to free
 that connection for another application.
 

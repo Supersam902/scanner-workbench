@@ -150,6 +150,14 @@ pub(super) struct Session {
     pub(super) failure: Option<String>,
 }
 
+pub(super) enum ProbeFailure {
+    Setup(Elm327Error),
+    Transport(Elm327Error),
+    Protocol(Elm327Error),
+    Reply(Option<CanProtocol>, Elm327Error),
+    Unverified(CanProtocol, Vec<DiagnosticResponse>),
+}
+
 impl Session {
     pub(super) fn open(endpoint: ElmEndpoint) -> Result<Self, Elm327Error> {
         let transport = match endpoint {
@@ -165,17 +173,22 @@ impl Session {
 
     pub(super) async fn probe(
         &mut self,
-    ) -> Result<(CanProtocol, String, Vec<DiagnosticResponse>), Elm327Error> {
+    ) -> Result<(CanProtocol, String, Vec<DiagnosticResponse>), ProbeFailure> {
         self.protocol = None;
         if let Some(reason) = &self.failure {
-            return Err(Elm327Error::Serial(reason.clone()));
+            return Err(ProbeFailure::Setup(Elm327Error::Serial(reason.clone())));
         }
-        crate::obd_ops::configure_elm(&mut self.transport, ElmCanMode::Auto, true).await?;
-        let lines = self.transport.send("0100", 8000).await?;
+        crate::obd_ops::configure_elm(&mut self.transport, ElmCanMode::Auto, true)
+            .await
+            .map_err(|error| ProbeFailure::during(error, ProbeFailure::Setup))?;
+        let lines = self.transport.send("0100", 8000).await.map_err(|error| {
+            ProbeFailure::during(error, |error| ProbeFailure::Reply(None, error))
+        })?;
         let number = self
             .transport
             .send("ATDPN", 1000)
-            .await?
+            .await
+            .map_err(|error| ProbeFailure::during(error, ProbeFailure::Protocol))?
             .into_iter()
             .next()
             .unwrap_or_default();
@@ -190,17 +203,22 @@ impl Session {
             "7" => CanProtocol::Can29Bit500K,
             "8" => CanProtocol::Can11Bit250K,
             "9" => CanProtocol::Can29Bit250K,
+            "0" => {
+                return Err(ProbeFailure::Reply(
+                    None,
+                    Elm327Error::ProtocolError("No vehicle protocol selected (ATDPN=0)".into()),
+                ));
+            }
             _ => {
-                return Err(Elm327Error::InitFailed(format!(
-                    "No standard OBD-II protocol selected ({number}). Check ignition and adapter connection."
+                return Err(ProbeFailure::Protocol(Elm327Error::InitFailed(
+                    "ATDPN did not report a supported OBD-II protocol".into(),
                 )));
             }
         };
-        let replies = decode_replies(&lines, protocol, &[1, 0])?;
+        let replies = decode_replies(&lines, protocol, &[1, 0])
+            .map_err(|error| ProbeFailure::Reply(Some(protocol), error))?;
         if !replies.iter().any(is_pid00_reply) {
-            return Err(Elm327Error::InitFailed(
-                "No complete supported-PID reply".into(),
-            ));
+            return Err(ProbeFailure::Unverified(protocol, replies));
         }
         self.protocol = Some(protocol);
         let identity = self.transport.info().elm_version.clone();
@@ -242,6 +260,16 @@ impl Session {
     pub(super) async fn close(mut self) {
         if self.protocol.is_some() && self.failure.is_none() {
             let _ = self.transport.send("ATPC", 500).await;
+        }
+    }
+}
+
+impl ProbeFailure {
+    fn during(error: Elm327Error, stage: impl FnOnce(Elm327Error) -> Self) -> Self {
+        if matches!(error, Elm327Error::Serial(_)) {
+            Self::Transport(error)
+        } else {
+            stage(error)
         }
     }
 }

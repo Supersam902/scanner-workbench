@@ -1,6 +1,7 @@
 //! Scanner Workbench: an independent application shell over the tested transports.
 mod appearance;
 mod codes;
+mod connection_report;
 #[doc(hidden)]
 pub mod driver;
 mod elm;
@@ -41,8 +42,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use worker::{
-    AttemptOutcome, Command, CommandSender, ConnectionAttempt, Event, ReadMode, ReplyCheck,
-    VehicleReply, VoltageAdapter, VoltageSample,
+    Command, CommandSender, Event, ReadMode, ReplyCheck, VehicleReply, VoltageAdapter,
+    VoltageSample,
 };
 
 pub const VERSION: &str = env!("SCANNER_WORKBENCH_VERSION");
@@ -216,7 +217,8 @@ pub struct Workbench {
     connection_id: Option<u64>,
     vehicle_reply: Option<VehicleReply>,
     vehicle_reply_check: Option<(Instant, ReplyCheck)>,
-    connection_attempts: Vec<ConnectionAttempt>,
+    connection_report: Option<connection_report::Report>,
+    connection_copied_until: Option<Instant>,
     connection_error: Option<String>,
     adapter_connect: Option<u64>,
     epoch: u64,
@@ -413,7 +415,8 @@ impl Workbench {
             connection_id: None,
             vehicle_reply: None,
             vehicle_reply_check: None,
-            connection_attempts: Vec::new(),
+            connection_report: None,
+            connection_copied_until: None,
             connection_error: None,
             adapter_connect: None,
             epoch: 1,
@@ -529,7 +532,9 @@ impl Workbench {
     }
     fn cancel_operation(&mut self) {
         if self.adapter_connect.take().is_some() {
-            self.connection_error = Some("Connection cancelled.".into());
+            let message = connection_report::CANCELLED;
+            self.finish_connection_report(message);
+            self.connection_error = Some(message.into());
         }
         let _ = self.finish_emissions_scan(true);
         self.stop_live();
@@ -546,6 +551,11 @@ impl Workbench {
         self.confirm_clear = false;
         self.clearing = false;
         self.progress = (0, 0, String::new());
+    }
+    fn finish_connection_report(&mut self, outcome: impl Into<String>) {
+        if let Some(report) = &mut self.connection_report {
+            report.finish(outcome);
+        }
     }
     fn stop_operation(&mut self) {
         let was_live = self.live;
@@ -637,7 +647,9 @@ impl Workbench {
             Ok(()) => {
                 self.driver_override = driver;
                 self.voltage = None;
-                self.connection_attempts.clear();
+                self.connection_report = None;
+                self.vehicle_reply_check = None;
+                self.connection_copied_until = None;
                 self.connection_error = None;
                 self.save_driver_preference();
             }
@@ -679,7 +691,9 @@ impl Workbench {
                 return false;
             }
             self.voltage = None;
-            self.connection_attempts.clear();
+            self.connection_report = None;
+            self.vehicle_reply_check = None;
+            self.connection_copied_until = None;
             self.connection_error = None;
             self.elm_connection = connection.clone();
         }
@@ -740,9 +754,27 @@ impl Workbench {
         self.vehicle_reply_check = None;
         self.connecting = true;
         self.busy = true;
-        self.connection_attempts.clear();
         self.connection_error = None;
+        self.connection_copied_until = None;
         self.adapter_connect = Some(self.epoch);
+        let protocol = self.protocol_override;
+        let ecu = self
+            .ecu_source
+            .filter(|_| protocol.is_none_or(CanProtocol::extended));
+        let mut report = connection_report::Report::new(
+            self.elm_connection.as_ref(),
+            self.driver_override.as_ref(),
+            protocol,
+            ecu,
+        );
+        if let Some(sample) = self
+            .voltage
+            .as_ref()
+            .filter(|sample| sample.sampled_at.elapsed() < connection_report::VOLTAGE_FRESHNESS)
+        {
+            report.observe_voltage(sample);
+        }
+        self.connection_report = Some(report);
         let command = if let Some(connection) = &self.elm_connection {
             self.status = format!("Connecting through {}…", connection.label());
             Command::ConnectElm {
@@ -757,16 +789,16 @@ impl Workbench {
             );
             Command::Connect {
                 id: self.epoch,
-                protocol: self.protocol_override,
-                ecu: self
-                    .ecu_source
-                    .filter(|_| self.protocol_override.is_none_or(CanProtocol::extended)),
+                protocol,
+                ecu,
                 cancel: self.cancel.clone(),
             }
         };
         if !self.send(command) {
             self.adapter_connect = None;
-            self.connection_error = Some(self.status.clone());
+            let error = self.status.clone();
+            self.finish_connection_report(error.clone());
+            self.connection_error = Some(error);
         }
     }
     pub fn start_demo(&mut self) {
@@ -1245,7 +1277,9 @@ impl Workbench {
                     self.status = text;
                 }
                 Event::ConnectAttempt(id, attempt) if self.adapter_connect == Some(id) => {
-                    self.connection_attempts.push(attempt);
+                    if let Some(report) = &mut self.connection_report {
+                        report.attempts.push(attempt);
+                    }
                 }
                 Event::Connected {
                     id,
@@ -1258,7 +1292,9 @@ impl Workbench {
                         self.disconnect();
                         continue;
                     }
-                    self.adapter_connect = None;
+                    if !demo && self.adapter_connect.take() == Some(id) {
+                        self.finish_connection_report(format!("Vehicle connected · {protocol}"));
+                    }
                     if !demo {
                         self.reset_results();
                         self.vehicle = Vehicle::default();
@@ -1316,6 +1352,11 @@ impl Workbench {
                     }) {
                         continue;
                     }
+                    if self.adapter_connect.is_some()
+                        && let (Some(report), Some(sample)) = (&mut self.connection_report, &value)
+                    {
+                        report.observe_voltage(sample);
+                    }
                     self.voltage = value;
                 }
                 Event::VehicleReply(id, reply)
@@ -1350,6 +1391,9 @@ impl Workbench {
                 Event::LinkLost(id, reason) if self.connection_id == Some(id) => {
                     self.voltage = None;
                     let message = format!("{reason}. Click Connect to try again.");
+                    if let Some(report) = &mut self.connection_report {
+                        report.record_link_loss(message.clone());
+                    }
                     self.connection_error = Some(message.clone());
                     self.connection_failed(message);
                 }
@@ -1361,6 +1405,7 @@ impl Workbench {
                 }
                 Event::Failed(id, text) if id == self.epoch => {
                     if self.adapter_connect.take() == Some(id) {
+                        self.finish_connection_report(text.clone());
                         self.connection_error = Some(text.clone());
                     }
                     self.connection_failed(text);

@@ -1,7 +1,10 @@
 #![cfg(any(target_os = "linux", target_os = "windows"))]
 
+use obd_dashboard::j2534::{CanProtocol, ProbePhase};
 use obd_dashboard::scanner::model::ElmConnection;
-use obd_dashboard::scanner::worker::{Command, Event, ReadMode, VoltageAdapter, spawn_with_driver};
+use obd_dashboard::scanner::worker::{
+    AttemptOutcome, Command, Event, ReadMode, VoltageAdapter, spawn_with_driver,
+};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -142,6 +145,107 @@ fn tcp_adapter_supplies_disconnected_voltage_and_separate_ecu_scan_results() {
     assert_eq!(commands.first().map(String::as_str), Some("ATRV"));
     assert!(commands.iter().any(|command| command == "ATH1"));
     assert!(commands.iter().all(|command| command != "04"));
+}
+
+#[test]
+fn elm_connection_reports_distinguish_setup_protocol_reply_and_transport_failures() {
+    for (failure, response, outcome, expected_protocol, expected_detail) in [
+        (
+            "ATH1",
+            Some("?"),
+            AttemptOutcome::ElmSetupFailed,
+            None,
+            "ATH1 rejected",
+        ),
+        (
+            "ATDPN",
+            Some("?"),
+            AttemptOutcome::ElmProtocolFailed,
+            None,
+            "ATDPN did not report",
+        ),
+        (
+            "ATDPN",
+            Some("A0"),
+            AttemptOutcome::ProbeFailed(ProbePhase::Reply),
+            None,
+            "ATDPN=0",
+        ),
+        (
+            "0100",
+            Some("7E80341008000000000"),
+            AttemptOutcome::ProbeFailed(ProbePhase::Reply),
+            Some(CanProtocol::Can11Bit500K),
+            "ECU 7E8 · Support bitmap is truncated · 410080",
+        ),
+        (
+            "0100",
+            None,
+            AttemptOutcome::ElmTransportFailed,
+            None,
+            "TCP adapter disconnected",
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let connection = ElmConnection::Tcp(listener.local_addr().unwrap().to_string());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut command = Vec::new();
+            while reader.read_until(b'\r', &mut command).unwrap_or(0) != 0 {
+                let text = std::str::from_utf8(&command)
+                    .unwrap()
+                    .trim_end_matches('\r');
+                let reply = if text == failure {
+                    let Some(response) = response else {
+                        break;
+                    };
+                    response
+                } else {
+                    match text {
+                        "ATZ" | "ATI" => "ELM327 v2.3",
+                        "0100" => "NO DATA",
+                        "ATDPN" => "A6",
+                        _ => "OK",
+                    }
+                };
+                write!(stream, "{reply}\r>").unwrap();
+                command.clear();
+            }
+        });
+        let (tx, rx) = spawn_with_driver(
+            Some(env!("CARGO_BIN_EXE_scanner-workstation").into()),
+            Vec::new,
+        );
+        tx.try_send(Command::ConnectElm {
+            id: 1,
+            connection,
+            cancel: Arc::new(AtomicBool::new(false)),
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+        let attempt = wait_for(
+            &rx,
+            Duration::from_secs(8),
+            |event| matches!(event, Event::ConnectAttempt(1, attempt) if attempt.outcome != AttemptOutcome::Opened),
+        );
+        let Event::ConnectAttempt(_, attempt) = attempt else {
+            unreachable!()
+        };
+        assert_eq!(attempt.outcome, outcome);
+        assert_eq!(attempt.protocol, expected_protocol);
+        let detail = attempt.detail.unwrap();
+        assert!(detail.contains(expected_detail), "{detail}");
+        let end = wait_for(&rx, Duration::from_secs(3), |event| {
+            matches!(event, Event::Failed(1, _) | Event::Connected { id: 1, .. })
+        });
+        assert!(matches!(end, Event::Failed(1, _)));
+        tx.try_send(Command::Shutdown)
+            .unwrap_or_else(|error| panic!("{error}"));
+        server.join().unwrap();
+    }
 }
 
 #[test]

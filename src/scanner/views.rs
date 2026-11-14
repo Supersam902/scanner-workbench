@@ -3,6 +3,7 @@ use super::appearance::{
 };
 use super::freeze_frames::{self, Frames, Links};
 use super::readiness::{MonitorState, ecu_reports};
+use super::worker::AttemptOutcome;
 use super::*;
 use crate::j2534::format_voltage;
 use egui::{Color32, RichText, Stroke, Vec2};
@@ -311,10 +312,9 @@ impl Workbench {
                     self.connect();
                 }
 
-                let sample = self
-                    .voltage
-                    .as_ref()
-                    .filter(|sample| sample.sampled_at.elapsed() < Duration::from_secs(6));
+                let sample = self.voltage.as_ref().filter(|sample| {
+                    sample.sampled_at.elapsed() < connection_report::VOLTAGE_FRESHNESS
+                });
                 let voltage =
                     sample.map_or_else(|| "—".into(), |sample| format_voltage(sample.millivolts));
                 egui::Frame::new()
@@ -685,6 +685,10 @@ impl Workbench {
     }
 
     fn connection(&mut self, ui: &mut egui::Ui) {
+        if self.connection_error.is_some() && self.vehicle_reply_check.is_none() {
+            card(ui, |ui| self.connection_attempts(ui));
+            ui.add_space(8.0);
+        }
         card(ui, |ui| {
             ui.set_min_width(ui.available_width());
             if let Some(driver) = &self.driver {
@@ -717,16 +721,11 @@ impl Workbench {
                     ui.strong("Last vehicle reply check");
                     caption(ui, &format!("{} s ago", checked_at.elapsed().as_secs()));
                     if ui.button("Copy reply check").clicked() {
-                        let mut copy = format!(
+                        ui.ctx().copy_text(format!(
                             "{}\nRequest 0100\n{}",
                             result.protocol.label(),
-                            result.outcome.label()
-                        );
-                        for reply in &result.responses {
-                            copy.push('\n');
-                            copy.push_str(&reply.label());
-                        }
-                        ui.ctx().copy_text(copy);
+                            result.summary()
+                        ));
                     }
                 });
                 let color = if result.outcome == ReplyCheckOutcome::Verified {
@@ -768,7 +767,9 @@ impl Workbench {
                 });
             }
         });
-        if self.has_connection_details() {
+        if self.has_connection_details()
+            && (self.connection_error.is_none() || self.vehicle_reply_check.is_some())
+        {
             ui.add_space(8.0);
             card(ui, |ui| self.connection_attempts(ui));
         }
@@ -1082,52 +1083,67 @@ impl Workbench {
     }
 
     fn has_connection_details(&self) -> bool {
-        self.adapter_connect.is_some()
-            || self.connection_error.is_some()
-            || !self.connection_attempts.is_empty()
+        self.connection_report.is_some() || self.connection_error.is_some()
     }
 
-    fn connection_attempts(&self, ui: &mut egui::Ui) {
+    fn connection_attempts(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(ui.available_width());
+        let Some(report) = &self.connection_report else {
+            if let Some(error) = &self.connection_error {
+                ui.add(egui::Label::new(RichText::new(error).color(AMBER)).wrap());
+            }
+            return;
+        };
         ui.horizontal_wrapped(|ui| {
             ui.strong("Connection attempts");
-            if (self.connection_error.is_some() || !self.connection_attempts.is_empty())
-                && ui.button("Copy results").clicked()
+            let copied = self
+                .connection_copied_until
+                .is_some_and(|until| Instant::now() < until);
+            if ui
+                .add_enabled(
+                    report.is_finished(),
+                    egui::Button::new(if copied {
+                        "Copied"
+                    } else {
+                        "Copy connection report"
+                    }),
+                )
+                .on_hover_text(
+                    "Includes adapter settings, DLC voltage and diagnostic connection results",
+                )
+                .clicked()
             {
-                let mut lines = Vec::new();
-                if let Some(result) = &self.connection_error {
-                    lines.push(result.clone());
-                }
-                for attempt in &self.connection_attempts {
-                    let mut line = attempt.driver.clone();
-                    if let Some(protocol) = attempt.protocol {
-                        line.push_str(" | ");
-                        line.push_str(protocol.label());
-                        if attempt.remembered_protocol {
-                            line.push_str(" (last verified)");
-                        }
-                    }
-                    line.push_str(" | ");
-                    line.push_str(attempt.outcome.label());
-                    if let Some(detail) = &attempt.detail {
-                        line.push_str(" | ");
-                        line.push_str(detail);
-                    }
-                    lines.push(line);
-                }
-                ui.ctx().copy_text(lines.join("\n"));
+                let reply_check = self.vehicle_reply_check.as_ref().map(|(_, check)| check);
+                ui.ctx().copy_text(report.text(reply_check));
+                self.connection_copied_until = Some(Instant::now() + Duration::from_millis(1600));
             }
         });
-        if let Some(result) = &self.connection_error {
-            ui.add(egui::Label::new(RichText::new(result).color(AMBER)).wrap());
+        if let Some(result) = report.result() {
+            let color = if self.connection_error.is_some() {
+                AMBER
+            } else {
+                GREEN
+            };
+            ui.add(egui::Label::new(RichText::new(result).color(color)).wrap());
+        }
+        if let Some(voltage) = report.voltage_label() {
+            caption(ui, &format!("Last DLC voltage at Connect · {voltage}"));
+        }
+        if report.is_finished()
+            && let Some(step) = report.next_step()
+        {
+            caption(ui, step);
+        }
+        if report.attempts.is_empty() {
+            return;
         }
         egui::ScrollArea::vertical()
             .id_salt("connection_attempts")
-            .max_height(295.0)
+            .max_height(165.0)
             .auto_shrink([false, true])
             .stick_to_bottom(self.adapter_connect.is_some())
             .show(ui, |ui| {
-                for (index, attempt) in self.connection_attempts.iter().enumerate() {
+                for (index, attempt) in report.attempts.iter().enumerate() {
                     if index > 0 {
                         ui.separator();
                     }

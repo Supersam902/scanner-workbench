@@ -127,7 +127,11 @@ pub(crate) async fn configure_elm(
 }
 
 async fn require_elm_ok<A: ElmAdapter>(elm: &mut A, command: &str) -> Result<(), Elm327Error> {
-    let lines = elm.send(command, 2000).await?;
+    let lines = elm.send(command, 2000).await.map_err(|error| match error {
+        Elm327Error::Serial(detail) => Elm327Error::Serial(format!("{command}: {detail}")),
+        Elm327Error::Timeout(detail) => Elm327Error::Timeout(format!("{command}: {detail}")),
+        other => other,
+    })?;
     if !lines.iter().any(|line| line.trim() == "OK") {
         return Err(Elm327Error::InitFailed(format!(
             "{command} rejected: {}",

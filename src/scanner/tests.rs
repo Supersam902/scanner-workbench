@@ -57,10 +57,22 @@ fn render_context() -> egui::Context {
 #[test]
 fn connection_page_keeps_the_latest_mongoose_result_after_starting_practice() {
     use crate::j2534::ProbePhase;
+    use worker::{AttemptOutcome, ConnectionAttempt};
 
     let mut app = Workbench::new(temp("connection-results"));
     let (events, rx) = mpsc::channel();
     app.rx = rx;
+    app.protocol_override = Some(CanProtocol::Can11Bit500K);
+    app.voltage = Some(VoltageSample {
+        adapter: VoltageAdapter::J2534(DriverInfo {
+            name: "Mongoose-Plus MFC3".into(),
+            path: PathBuf::from("sensitive-driver-directory/adapter.dll"),
+        }),
+        millivolts: 12700,
+        sampled_at: Instant::now(),
+    });
+    app.vehicle.vin = "JTDBR32E720123456".into();
+    app.logs.push_back("Private log line".into());
     app.connect();
     let id = app.epoch;
     let attempt = || ConnectionAttempt {
@@ -78,8 +90,9 @@ fn connection_page_keeps_the_latest_mongoose_result_after_starting_practice() {
     events.send(Event::Failed(id, result.into())).unwrap();
     events.send(Event::ConnectAttempt(id, attempt())).unwrap();
     app.tick();
-    assert_eq!(app.connection_attempts.len(), 1);
+    assert_eq!(app.connection_report.as_ref().unwrap().attempts.len(), 1);
     assert_eq!(app.connection_error.as_deref(), Some(result));
+    events.send(Event::Voltage(None)).unwrap();
 
     app.start_demo();
     events
@@ -93,29 +106,32 @@ fn connection_page_keeps_the_latest_mongoose_result_after_starting_practice() {
         .unwrap();
     app.tick();
     assert!(app.connected && app.demo);
+    app.protocol_override = Some(CanProtocol::KwpFast);
     app.page = Page::Connection;
     let ctx = render_context();
-    let output = ctx.run(
-        egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 560.0),
-            )),
-            ..Default::default()
-        },
-        |ctx| app.draw(ctx),
-    );
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 560.0));
+    let draw = |app: &mut Workbench, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    };
+    let output = draw(&mut app, vec![]);
     let labels: BTreeSet<_> = output
         .shapes
-        .into_iter()
-        .filter_map(|shape| match shape.shape {
+        .iter()
+        .filter_map(|shape| match &shape.shape {
             egui::Shape::Text(text) => Some(text.galley.job.text.clone()),
             _ => None,
         })
         .collect();
     for label in [
         "Connection attempts",
-        "Copy results",
+        "Copy connection report",
         "CAN 11-bit / 500 kbit/s",
         "Last verified protocol",
         "Request transmission failed",
@@ -123,12 +139,110 @@ fn connection_page_keeps_the_latest_mongoose_result_after_starting_practice() {
     ] {
         assert!(labels.contains(label), "Missing {label}");
     }
+    let pos = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == "Copy connection report" => {
+                let rect = text.visual_bounding_rect();
+                shape
+                    .clip_rect
+                    .intersect(screen)
+                    .contains_rect(rect)
+                    .then_some(rect.center())
+            }
+            _ => None,
+        })
+        .expect("copy report is visible in the compact window");
+    let button = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    draw(&mut app, vec![egui::Event::PointerMoved(pos), button(true)]);
+    let copied = draw(&mut app, vec![button(false)]);
+    let report = copied
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            egui::OutputCommand::CopyText(text) => Some(text),
+            _ => None,
+        })
+        .expect("connection report was copied");
+    assert!(report.contains(&format!("Scanner Workbench {VERSION}")));
+    assert!(report.contains("Protocol selection: CAN 11-bit / 500 kbit/s"));
+    assert!(report.contains("Last DLC voltage at Connect: 12.7 V · Mongoose-Plus MFC3"));
+    assert!(report.contains("Request transmission failed"));
+    assert!(report.contains("Next check: Check the DLC connection and ignition"));
+    for private in [
+        "sensitive-driver-directory",
+        "Private log line",
+        "JTDBR32E720123456",
+        "KWP2000",
+    ] {
+        assert!(!report.contains(private), "Copied unrelated data {private}");
+    }
+    assert!(draw(&mut app, vec![]).shapes.iter().any(|shape| {
+        matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == "Copied")
+    }));
     app.connect();
-    assert!(app.connection_error.is_none() && app.connection_attempts.is_empty());
+    assert!(
+        app.connection_error.is_none()
+            && app.connection_report.as_ref().unwrap().attempts.is_empty()
+    );
     let id = app.epoch;
     events.send(Event::Failed(id, result.into())).unwrap();
     app.tick();
     assert_eq!(app.connection_error.as_deref(), Some(result));
+}
+
+#[test]
+fn connection_report_preserves_connect_evidence_and_excludes_later_voltage() {
+    use worker::{ReplyCheckOutcome, ReplyEvidence};
+
+    let connection = ElmConnection::Serial {
+        port: "COM7".into(),
+        baud: None,
+    };
+    let mut report = connection_report::Report::new(Some(&connection), None, None, None);
+    let wrong_adapter = VoltageSample {
+        adapter: VoltageAdapter::Elm(ElmConnection::Tcp("192.168.0.10:35000".into())),
+        millivolts: 10000,
+        sampled_at: Instant::now(),
+    };
+    report.observe_voltage(&wrong_adapter);
+    assert!(report.voltage_label().is_none());
+    report.observe_voltage(&VoltageSample {
+        adapter: VoltageAdapter::Elm(connection.clone()),
+        millivolts: 12100,
+        sampled_at: Instant::now(),
+    });
+    report.finish("Vehicle connected · CAN 11-bit / 500 kbit/s");
+    report.record_link_loss("TCP adapter disconnected".into());
+    report.observe_voltage(&VoltageSample {
+        adapter: VoltageAdapter::Elm(connection),
+        millivolts: 13100,
+        sampled_at: Instant::now(),
+    });
+    let check = ReplyCheck {
+        protocol: CanProtocol::Can11Bit500K,
+        outcome: ReplyCheckOutcome::Partial,
+        responses: vec![ReplyEvidence {
+            source: Some(0x7e8),
+            description: "Support bitmap is truncated".into(),
+            raw: "410080".into(),
+        }],
+    };
+    let text = report.text(Some(&check));
+    assert!(text.contains("Adapter: ELM-compatible Serial · COM7\nBaud rate: Automatic"));
+    assert!(text.contains("Result: Vehicle connected"));
+    assert!(text.contains("Link lost: TCP adapter disconnected"));
+    assert!(text.contains("Last DLC voltage at Connect: 12.1 V"));
+    assert!(text.contains("Request 0100\nVehicle replied. Some ECU results are unverified."));
+    assert!(text.contains("ECU 7E8 · Support bitmap is truncated · 410080"));
+    assert!(!text.contains("13.1 V"));
 }
 
 #[test]

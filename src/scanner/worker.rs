@@ -1,4 +1,5 @@
 use super::codes;
+use super::connection_report::CANCELLED;
 use super::driver::{DriverProcess, Request, Value};
 use super::elm::{ElmConnection, ElmEndpoint};
 use super::live_reads;
@@ -141,7 +142,10 @@ pub enum AttemptOutcome {
     Opened,
     OpenFailed,
     ProbeFailed(ProbePhase),
+    ElmSetupFailed,
+    ElmProtocolFailed,
     DriverFailed,
+    ElmTransportFailed,
     Verified,
     Cancelled,
 }
@@ -151,6 +155,8 @@ impl AttemptOutcome {
         match self {
             Self::Opened => "Cable opened",
             Self::OpenFailed => "Cable open failed",
+            Self::ElmSetupFailed => "ELM setup failed",
+            Self::ElmProtocolFailed => "ELM protocol identification failed",
             Self::ProbeFailed(phase) => match phase {
                 ProbePhase::Channel => "Channel open failed",
                 ProbePhase::Setup => "Request setup failed",
@@ -161,6 +167,7 @@ impl AttemptOutcome {
                 ProbePhase::Cleanup => "Channel close failed",
             },
             Self::DriverFailed => "Driver process failed",
+            Self::ElmTransportFailed => "ELM transport failed",
             Self::Verified => "Verified ECU reply",
             Self::Cancelled => "Cancelled",
         }
@@ -265,6 +272,14 @@ impl ReplyCheck {
                 };
             }
         };
+        Self::inspect(&replies, expected.iter().flatten().copied(), protocol)
+    }
+
+    fn inspect(
+        replies: &[DiagnosticResponse],
+        expected: impl IntoIterator<Item = u32>,
+        protocol: CanProtocol,
+    ) -> Self {
         let mut verified = 0;
         let mut rejected = 0;
         let mut responses: Vec<_> = replies
@@ -300,7 +315,7 @@ impl ReplyCheck {
             count if rejected == count => ReplyCheckOutcome::Rejected,
             _ => ReplyCheckOutcome::Incomplete,
         };
-        for &source in expected.iter().flatten() {
+        for source in expected {
             if replies.iter().any(|reply| reply.source == Some(source)) {
                 continue;
             }
@@ -319,8 +334,18 @@ impl ReplyCheck {
             responses,
         }
     }
+
+    pub(super) fn summary(&self) -> String {
+        let mut evidence = self.outcome.label().to_owned();
+        for response in &self.responses {
+            evidence.push('\n');
+            evidence.push_str(&response.label());
+        }
+        evidence
+    }
 }
 
+#[derive(Clone)]
 pub struct VoltageSample {
     pub adapter: VoltageAdapter,
     pub millivolts: u32,
@@ -778,7 +803,7 @@ fn connect_vehicle(
         let _ = tx.send(Event::ConnectProgress(id, message));
     };
     if cancelled() {
-        return Err("Connection cancelled.".into());
+        return Err(CANCELLED.into());
     }
     let automatic = override_protocol.is_none() && ecu.is_none();
     let default_protocols: &[CanProtocol] = match override_protocol {
@@ -944,7 +969,12 @@ fn connect_vehicle(
             }
             let (outcome, probe_error) = match probe {
                 Ok(Value::Replies(replies)) => {
-                    attempt(Some(protocol), AttemptOutcome::Verified, None);
+                    let check = ReplyCheck::inspect(&replies, [], protocol);
+                    attempt(
+                        Some(protocol),
+                        AttemptOutcome::Verified,
+                        Some(check.summary()),
+                    );
                     let info = ConnectionInfo {
                         port: driver.name.clone(),
                         protocol: protocol.label().into(),
@@ -991,7 +1021,7 @@ fn connect_vehicle(
         ));
     }
     if cancelled() {
-        Err("Connection cancelled.".into())
+        Err(CANCELLED.into())
     } else if cable_opened {
         let result = match furthest_phase {
             Some(ProbePhase::Transmit) => {
@@ -1100,11 +1130,27 @@ fn connect_elm(
         let mut adapter = match idle.take() {
             Some((adapter, open_endpoint)) if open_endpoint == endpoint => adapter,
             _ => {
-                let mut adapter = runtime.launch()?;
-                match adapter.call(Request::OpenElm(endpoint), cancelled) {
+                let mut adapter = match runtime.launch() {
+                    Ok(adapter) => adapter,
+                    Err(error) => {
+                        attempt(None, AttemptOutcome::DriverFailed, Some(error.clone()));
+                        return Err(error);
+                    }
+                };
+                let opened = adapter.call(Request::OpenElm(endpoint), cancelled);
+                if cancelled() {
+                    attempt(None, AttemptOutcome::Cancelled, None);
+                    break;
+                }
+                match opened {
                     Ok(Value::Done) => adapter,
                     Err(error) => {
-                        attempt(None, AttemptOutcome::OpenFailed, Some(error.clone()));
+                        let outcome = if adapter.failure().is_some() {
+                            AttemptOutcome::DriverFailed
+                        } else {
+                            AttemptOutcome::OpenFailed
+                        };
+                        attempt(None, outcome, Some(error.clone()));
                         last_error = error;
                         // An unavailable port cannot be opened at any baud rate.
                         break;
@@ -1114,13 +1160,23 @@ fn connect_elm(
             }
         };
         attempt(None, AttemptOutcome::Opened, None);
-        match adapter.call(Request::ProbeElm, cancelled) {
+        let probe = adapter.call(Request::ProbeElm, cancelled);
+        if cancelled() {
+            attempt(None, AttemptOutcome::Cancelled, None);
+            break;
+        }
+        let (protocol, outcome, message) = match probe {
             Ok(Value::ElmProbed {
                 protocol,
                 identity,
                 replies,
-            }) if !cancelled() => {
-                attempt(Some(protocol), AttemptOutcome::Verified, None);
+            }) => {
+                let check = ReplyCheck::inspect(&replies, [], protocol);
+                attempt(
+                    Some(protocol),
+                    AttemptOutcome::Verified,
+                    Some(check.summary()),
+                );
                 let driver = if identity.is_empty() {
                     name
                 } else {
@@ -1150,23 +1206,31 @@ fn connect_elm(
                 };
                 return Ok((link, replies, baud));
             }
-            _ if cancelled() => {
-                attempt(None, AttemptOutcome::Cancelled, None);
-                break;
+            Ok(Value::ElmSetupFailed(message)) => (None, AttemptOutcome::ElmSetupFailed, message),
+            Ok(Value::ElmTransportFailed(message)) => {
+                (None, AttemptOutcome::ElmTransportFailed, message)
             }
-            Err(error) => {
-                attempt(
-                    None,
-                    AttemptOutcome::ProbeFailed(ProbePhase::Reply),
-                    Some(error.clone()),
-                );
-                last_error = error;
+            Ok(Value::ElmProtocolFailed(message)) => {
+                (None, AttemptOutcome::ElmProtocolFailed, message)
             }
+            Ok(Value::ElmReplyFailed { protocol, message }) => (
+                protocol,
+                AttemptOutcome::ProbeFailed(ProbePhase::Reply),
+                message,
+            ),
+            Ok(Value::ElmUnverified { protocol, replies }) => (
+                Some(protocol),
+                AttemptOutcome::ProbeFailed(ProbePhase::Reply),
+                ReplyCheck::inspect(&replies, [], protocol).summary(),
+            ),
+            Err(error) => (None, AttemptOutcome::DriverFailed, error),
             Ok(_) => unreachable!("the driver response type was checked"),
-        }
+        };
+        attempt(protocol, outcome, Some(message.clone()));
+        last_error = format!("{}. {message}", outcome.label());
     }
     if cancelled() {
-        Err("Connection cancelled.".into())
+        Err(CANCELLED.into())
     } else {
         Err(format!(
             "{} did not connect. {last_error}",
@@ -1911,7 +1975,7 @@ fn run(
                     remembered.map(|connection| connection.driver.as_path()),
                 );
                 let result = if cancel.load(Ordering::Relaxed) {
-                    Err("Connection cancelled.".into())
+                    Err(CANCELLED.into())
                 } else if drivers.is_empty() {
                     Err(if selected_driver.is_some() {
                         "The selected J2534 driver is no longer listed. Choose an installed driver under Connection."
@@ -1940,7 +2004,7 @@ fn run(
                         link = Some(Link::Physical(Box::new(physical)));
                         close_link(&mut link, &mut kline_retry_at);
                     }
-                    let _ = tx.send(Event::Failed(id, "Connection cancelled.".into()));
+                    let _ = tx.send(Event::Failed(id, CANCELLED.into()));
                     continue;
                 }
                 match result {
@@ -2010,7 +2074,7 @@ fn run(
                         link = Some(Link::Physical(Box::new(physical)));
                         close_link(&mut link, &mut kline_retry_at);
                     }
-                    let _ = tx.send(Event::Failed(id, "Connection cancelled.".into()));
+                    let _ = tx.send(Event::Failed(id, CANCELLED.into()));
                     continue;
                 }
                 match result {

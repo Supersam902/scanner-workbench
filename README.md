@@ -15,6 +15,8 @@ Scanner Workbench is a generic OBD-II scan tool for Windows that works with a wi
 
 Open **Connection → Adapter** to choose the adapter type. J2534 uses the vendor's **32-bit Windows 04.04 driver** and detects supported cables automatically. For ELM serial, choose the adapter's COM port. For Wi-Fi/TCP, enter the host and port specified by the adapter. Workbench saves your choice for **Connect** and the DLC voltage readout. It verifies an OBD-II reply before showing the vehicle as connected.
 
+Use **Copy connection report** under **Connection → Adapter** to share the adapter settings, voltage at Connect, and protocol results when troubleshooting.
+
 Check that the adapter supports your vehicle's protocol. Workbench supports ISO 15765 CAN (11-bit and 29-bit), ISO 9141-2, ISO 14230 KWP2000, and SAE J1850 VPW/PWM. ELM327-compatible adapters need automatic OBD-II protocol detection and ECU response headers. Available readings depend on the adapter and the ECUs that respond.
 
 ## Scan and save results

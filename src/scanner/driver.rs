@@ -1,6 +1,6 @@
 //! The scanner UI never loads a vendor DLL. This private pipe protocol runs
 //! J2534 and ELM I/O in a child of the same executable and bounds every call.
-use super::elm::{ElmEndpoint, Session};
+use super::elm::{ElmEndpoint, ProbeFailure as ElmProbeFailure, Session};
 use crate::adapter::{DiagnosticAdapter, DiagnosticResponse, DiagnosticTarget};
 use crate::elm327::{Elm327Error, block_on};
 use crate::j2534::{CanProtocol, J2534, ProbePhase};
@@ -67,6 +67,17 @@ pub(super) enum Value {
     ElmProbed {
         protocol: CanProtocol,
         identity: String,
+        replies: Vec<DiagnosticResponse>,
+    },
+    ElmSetupFailed(String),
+    ElmTransportFailed(String),
+    ElmProtocolFailed(String),
+    ElmReplyFailed {
+        protocol: Option<CanProtocol>,
+        message: String,
+    },
+    ElmUnverified {
+        protocol: CanProtocol,
         replies: Vec<DiagnosticResponse>,
     },
     ReadTimeout(String),
@@ -203,15 +214,27 @@ fn handle_request(adapter: &mut Option<Device>, request: Request) -> Result<Valu
                         }
                     }
                 }
-                (Device::Elm(adapter), Request::ProbeElm) => {
-                    block_on(adapter.probe()).map(|(protocol, identity, replies)| {
-                        Value::ElmProbed {
-                            protocol,
-                            identity,
-                            replies,
-                        }
-                    })
-                }
+                (Device::Elm(adapter), Request::ProbeElm) => Ok(match block_on(adapter.probe()) {
+                    Ok((protocol, identity, replies)) => Value::ElmProbed {
+                        protocol,
+                        identity,
+                        replies,
+                    },
+                    Err(ElmProbeFailure::Setup(error)) => Value::ElmSetupFailed(error.to_string()),
+                    Err(ElmProbeFailure::Transport(error)) => {
+                        Value::ElmTransportFailed(error.to_string())
+                    }
+                    Err(ElmProbeFailure::Protocol(error)) => {
+                        Value::ElmProtocolFailed(error.to_string())
+                    }
+                    Err(ElmProbeFailure::Reply(protocol, error)) => Value::ElmReplyFailed {
+                        protocol,
+                        message: error.to_string(),
+                    },
+                    Err(ElmProbeFailure::Unverified(protocol, replies)) => {
+                        Value::ElmUnverified { protocol, replies }
+                    }
+                }),
                 (Device::J2534(adapter), Request::Voltage) => {
                     adapter.read_battery_millivolts().map(Value::Voltage)
                 }
@@ -348,7 +371,17 @@ impl DriverProcess {
             Request::Probe(..) => {
                 |value| matches!(value, Value::Replies(_) | Value::ProbeFailed { .. })
             }
-            Request::ProbeElm => |value| matches!(value, Value::ElmProbed { .. }),
+            Request::ProbeElm => |value| {
+                matches!(
+                    value,
+                    Value::ElmProbed { .. }
+                        | Value::ElmSetupFailed(_)
+                        | Value::ElmTransportFailed(_)
+                        | Value::ElmProtocolFailed(_)
+                        | Value::ElmReplyFailed { .. }
+                        | Value::ElmUnverified { .. }
+                )
+            },
             Request::Voltage => |value| matches!(value, Value::Voltage(_)),
             _ => |value| matches!(value, Value::Done),
         };
