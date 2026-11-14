@@ -18,6 +18,22 @@ pub enum ScanEvent {
     Interrupted,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClearScanStage {
+    Before,
+    After,
+}
+
+impl ClearScanStage {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Before => "Before clear",
+            Self::After => "After clear request",
+        }
+    }
+}
+
 pub const MAX_CAPTURE_ROWS: usize = 50_000;
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CAPTURE_DURATION_MS: u64 = 7 * 24 * 3600 * 1000;
@@ -348,6 +364,8 @@ pub struct Sample {
     pub graph_break: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emissions_scan: Option<ScanEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clear_scan_stage: Option<ClearScanStage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -398,6 +416,11 @@ impl Capture {
                 return Err("Recording timestamps are invalid".into());
             }
             previous = sample.at_ms;
+            if sample.clear_scan_stage.is_some()
+                && !matches!(sample.emissions_scan, Some(ScanEvent::Started))
+            {
+                return Err("Clear scan stage must be recorded at the start of a scan".into());
+            }
             match sample.emissions_scan {
                 Some(ScanEvent::Started) if !scanning && sample.rows.is_empty() => {
                     scanning = true;
@@ -1135,7 +1158,11 @@ pub(super) fn report_with_descriptions(
             super::emissions_scan::State::Finished => "Emissions scan finished",
             super::emissions_scan::State::Interrupted => "Emissions scan interrupted",
         };
-        html.push_str(&format!("<p><strong>{status}</strong></p>"));
+        let stage = scan.clear_stage.map_or("", ClearScanStage::label);
+        html.push_str(&format!(
+            "<p><strong>{status}</strong>{}{stage}</p>",
+            if stage.is_empty() { "" } else { " · " }
+        ));
     }
     if snapshot.clear_attempt_ms().is_some() {
         let acknowledgments = snapshot

@@ -588,6 +588,9 @@ impl Workbench {
                         scan.state.label()
                     };
                     caption(ui, status);
+                    if let Some(stage) = scan.clear_stage {
+                        caption(ui, stage.label());
+                    }
                     caption(ui, &recordings::recording_date(scan.started_ms));
                     if finished {
                         if ui.button("Review scan").clicked()
@@ -1267,8 +1270,21 @@ impl Workbench {
                 self.save_baseline();
             }
         });
+        if !self.confirm_clear
+            && let Some(snapshot) = self
+                .before_clear_scan
+                .as_ref()
+                .map(|(_, scan)| scan.clone())
+        {
+            ui.horizontal_wrapped(|ui| {
+                caption(ui, "Before-clear scan saved");
+                if ui.link("Review before-clear scan").clicked() {
+                    self.open_scan_review(snapshot, Page::Codes);
+                }
+            });
+        }
         if self.results.clear_attempt_ms().is_some() {
-            let recheck = card(ui, |ui| {
+            card(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(RichText::new("Latest emissions clear request").strong());
                 let mut acknowledged = false;
@@ -1291,16 +1307,19 @@ impl Workbench {
                     ui.colored_label(AMBER, "No ECU acknowledgment received.");
                 }
                 self.failures(ui, |r| r.request == "04");
-                action(
-                    ui,
-                    "Recheck codes and readiness",
-                    self.connected && !self.busy,
-                )
-            })
-            .inner;
-            if recheck {
-                self.recheck_after_clear();
-            }
+                ui.horizontal_wrapped(|ui| {
+                    let ready = self.connected && !self.busy;
+                    if action(ui, "Save follow-up scan", ready) {
+                        self.capture_follow_up();
+                    }
+                    if ui
+                        .add_enabled(ready, egui::Button::new("Recheck codes and readiness"))
+                        .clicked()
+                    {
+                        self.recheck_after_clear();
+                    }
+                });
+            });
             ui.add_space(4.0);
         }
         ui.horizontal_wrapped(|ui| {
@@ -2902,7 +2921,7 @@ impl Workbench {
             ui.add(
                 egui::TextEdit::singleline(&mut self.scan_history.search)
                     .desired_width(225.0)
-                    .hint_text("Filter vehicle, VIN, plate or date"),
+                    .hint_text("Filter vehicle, VIN, plate, date or scan stage"),
             );
             if self.scan_history.entries.is_none() || ui.button("Refresh scans").clicked() {
                 self.scan_history.refresh(&dir);
@@ -2983,7 +3002,7 @@ impl Workbench {
                 .striped(true)
                 .column(egui_extras::Column::initial(175.0))
                 .column(egui_extras::Column::remainder().at_least(145.0))
-                .column(egui_extras::Column::initial(106.0))
+                .column(egui_extras::Column::initial(201.0))
                 .max_scroll_height(245.0)
                 .header(27.0, |mut row| {
                     for label in ["Scan date", "Vehicle", "Status"] {
@@ -3021,14 +3040,21 @@ impl Workbench {
                             }
                         });
                         row.col(|ui| {
-                            ui.colored_label(
-                                if entry.state == emissions_scan::State::Interrupted {
-                                    AMBER
-                                } else {
-                                    MUTED
-                                },
-                                entry.state.label(),
+                            let label = entry.clear_stage.map_or_else(
+                                || entry.state.label().to_owned(),
+                                |stage| format!("{} · {}", stage.label(), entry.state.label()),
                             );
+                            ui.add(
+                                egui::Label::new(RichText::new(&label).color(
+                                    if entry.state == emissions_scan::State::Interrupted {
+                                        AMBER
+                                    } else {
+                                        MUTED
+                                    },
+                                ))
+                                .truncate(),
+                            )
+                            .on_hover_text(label);
                         });
                     });
                 });
@@ -3057,6 +3083,9 @@ impl Workbench {
                         snapshot.vehicle.label()
                     });
                     caption(ui, &recordings::recording_date(scan.started_ms));
+                    if let Some(stage) = scan.clear_stage {
+                        caption(ui, stage.label());
+                    }
                     (
                         action(ui, "Review scan", true),
                         ui.button("Print saved scan").clicked(),
@@ -3505,11 +3534,30 @@ impl Workbench {
                     ui.set_max_width(490.0);
                     ui.label("This sends generic Mode 04. It can erase stored emissions codes and freeze-frame evidence, and reset readiness monitors. Permanent codes are not directly erased.");
                     ui.label(format!("Vehicle: {}", self.vehicle.label()));
+                    let before = self.before_clear_scan.as_ref().map(|(_, snapshot)| snapshot.clone());
+                    let left_dialog = ui.horizontal_wrapped(|ui| {
+                        if let Some(snapshot) = before {
+                            caption(ui, "Before-clear scan saved");
+                            if ui.link("Review before-clear scan").clicked() {
+                                self.confirm_clear = false;
+                                self.open_scan_review(snapshot, Page::Codes);
+                                return true;
+                            }
+                        }
+                        if ui.add_enabled(self.connected && !self.busy, egui::Button::new("Save before-clear scan")).clicked() {
+                            self.confirm_clear = false;
+                            self.capture_emissions_scan(Some(ClearScanStage::Before));
+                            return true;
+                        }
+                        false
+                    }).inner;
+                    if left_dialog {
+                        return;
+                    }
                     ui.checkbox(&mut self.clear_ready, "I have saved the diagnostic evidence I need");
                     ui.horizontal(|ui| {
                         if action(ui, "Confirm clear", self.clear_ready && self.connected && !self.busy) {
-                            self.live = false;
-                            self.dispatch(vec![self.base_query(4, None)], None, ReadMode::Control);
+                            self.confirm_emissions_clear();
                         }
                         if ui.button("Cancel").clicked() {
                             self.confirm_clear = false;

@@ -166,7 +166,13 @@ stored-code list when that ECU sends no list.
 
 Trouble Codes lists each ECU that acknowledges a clear request.
 Affected readings from before the request stay marked as historical until you
-reread them. Click Recheck codes and readiness for a follow-up scan.
+reread them. In the clear dialog, Save before-clear scan captures and saves
+codes, readiness, VIN and freeze frame before you decide whether to clear.
+Open Clear emissions codes again and confirm when you're ready. After a
+clear request, Save follow-up scan saves fresh results and opens Scan history.
+If the VIN or plate matches the before-clear capture from this session, the
+comparison opens with the two scans selected. Recheck codes and readiness
+is available for a quick read.
 
 Garage details apply to the current session. Saved comparisons need a VIN or
 plate/fleet ID. Scan history, recordings, settings, reports and the diagnostic log are stored

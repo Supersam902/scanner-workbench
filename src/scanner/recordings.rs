@@ -309,10 +309,11 @@ fn write_csv(out: &mut impl Write, capture: &Capture) -> io::Result<()> {
                 ScanEvent::Finished => "Emissions scan finished",
                 ScanEvent::Interrupted => "Emissions scan interrupted",
             };
+            let stage = sample.clear_scan_stage.map_or("", |stage| stage.label());
             csv_row(
                 out,
                 [
-                    &elapsed, &timestamp, session, event, "", "", "", "", "", "", "", "",
+                    &elapsed, &timestamp, session, event, "", "", "", stage, "", "", "", "",
                 ],
             )?;
         }

@@ -49,6 +49,9 @@ impl Review {
                 });
                 ui.label(recordings::recording_date(scan.started_ms));
                 ui.label(scan.state.label());
+                if let Some(stage) = scan.clear_stage {
+                    caption(ui, stage.label());
+                }
                 print = ui.button("Print scan report").clicked();
             });
         }
@@ -340,14 +343,12 @@ impl Workbench {
             return;
         };
         ui.label(super::appearance::title("Scan review", 23.0));
-        if ui
-            .link(if review.from == Page::ScanHistory {
-                "Back to scan history"
-            } else {
-                "Back to overview"
-            })
-            .clicked()
-        {
+        let back = match review.from {
+            Page::ScanHistory => "Back to scan history",
+            Page::Codes => "Back to trouble codes",
+            _ => "Back to overview",
+        };
+        if ui.link(back).clicked() {
             self.page = review.from;
             self.scan_review = None;
             return;

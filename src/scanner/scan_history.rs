@@ -1,5 +1,5 @@
 use super::emissions_scan::{Scan, State};
-use super::model::{Snapshot, Vehicle, load_json, save_json};
+use super::model::{ClearScanStage, Snapshot, Vehicle, load_json, save_json};
 use super::recordings::recording_date;
 use super::scan_comparison::{Comparison, same_vehicle};
 use serde::Deserialize;
@@ -25,6 +25,7 @@ pub(super) struct Entry {
     pub(super) date: String,
     pub(super) title: String,
     pub(super) state: State,
+    pub(super) clear_stage: Option<ClearScanStage>,
     vehicle: Vehicle,
     demo: bool,
     ended_ms: u64,
@@ -39,14 +40,19 @@ impl Entry {
         } else {
             vehicle.label()
         };
-        let search_text =
-            format!("{date} {title} {} {}", vehicle.vin, vehicle.registration).to_lowercase();
+        let stage = scan.clear_stage.map_or("", ClearScanStage::label);
+        let search_text = format!(
+            "{date} {title} {stage} {} {}",
+            vehicle.vin, vehicle.registration
+        )
+        .to_lowercase();
         Self {
             path,
             started_ms: scan.started_ms,
             date,
             title,
             state: scan.state,
+            clear_stage: scan.clear_stage,
             vehicle,
             demo,
             ended_ms,
@@ -168,10 +174,8 @@ impl History {
         Ok(())
     }
 
-    pub(super) fn archive(&mut self, dir: &Path, snapshot: Arc<Snapshot>) {
-        let Some(scan) = snapshot.emissions_scan.as_ref() else {
-            return;
-        };
+    pub(super) fn archive(&mut self, dir: &Path, snapshot: Arc<Snapshot>) -> Option<PathBuf> {
+        let scan = snapshot.emissions_scan.as_ref()?;
         static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
         let path = loop {
             let sequence = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
@@ -184,8 +188,16 @@ impl History {
                 break path;
             }
         };
-        self.pending.push(Pending { path, snapshot });
+        self.pending.push(Pending {
+            path: path.clone(),
+            snapshot,
+        });
         self.retry_saves();
+        if self.pending.iter().any(|item| item.path == path) {
+            None
+        } else {
+            Some(path)
+        }
     }
 
     pub(super) fn pending_count(&self) -> usize {

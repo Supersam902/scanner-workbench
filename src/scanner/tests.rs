@@ -1474,18 +1474,73 @@ fn saved_scan_comparison_prints_changes_after_clear_and_restart() {
         let mut app = Workbench::new(root.clone());
         app.start_demo();
         pump(&mut app);
-        app.read_emissions_scan();
+        app.page = Page::Codes;
+        app.start_recording();
+        app.capture_follow_up();
+        assert!(!app.busy);
+        app.capture_emissions_scan(Some(ClearScanStage::Before));
         pump(&mut app);
-        app.dispatch(vec![app.base_query(4, None)], None, ReadMode::Control);
+        let (before_path, before) = app.before_clear_scan.clone().unwrap();
+        assert!(before_path.is_file());
+        assert!(
+            before
+                .rows
+                .iter()
+                .any(|row| row.reading.request == "03" && row.reading.value == "P0133")
+        );
+        assert!(
+            before
+                .rows
+                .iter()
+                .any(|row| row.reading.request.starts_with("02"))
+        );
+        assert!(report(&before, None).contains("Before clear"));
+        assert!(app.results.clear_attempt_ms().is_none());
+        app.confirm_emissions_clear();
+        assert!(app.results.clear_attempt_ms().is_none());
+        app.confirm_clear = true;
+        app.confirm_emissions_clear();
+        assert!(app.results.clear_attempt_ms().is_none());
+        app.clear_ready = true;
+        app.confirm_emissions_clear();
+        assert!(app.clearing);
         pump(&mut app);
-        app.read_emissions_scan();
+        assert_eq!(app.clear_baseline.as_ref(), Some(&before_path));
+        assert!(
+            app.results
+                .rows
+                .values()
+                .any(|row| row.latest.reading.request == "04")
+        );
+        app.capture_follow_up();
         pump(&mut app);
+        assert_eq!(app.page, Page::ScanHistory);
+        assert_eq!(app.scan_history.comparison.as_ref().unwrap().0, before_path);
+        let after = &app.scan_history.selected.as_ref().unwrap().1;
+        assert!(report(after, None).contains("After clear request"));
+
+        app.finish_recording();
+        let capture: Capture = load_json(&app.saved_recordings[0].path).unwrap();
+        capture.validate().unwrap();
+        let replay = capture.replay(capture.end_ms());
+        assert_eq!(
+            replay.emissions_scan.unwrap().clear_stage,
+            Some(ClearScanStage::After)
+        );
+        let csv = root.join("before-after.csv");
+        recordings::save_csv(&csv, &capture).unwrap();
+        let csv = std::fs::read_to_string(csv).unwrap();
+        assert!(csv.contains("Before clear"));
+        assert!(csv.contains("After clear request"));
     }
 
     let mut app = Workbench::new(root.clone());
     app.scan_history.refresh(&root.join("scans"));
     let entries = app.scan_history.entries.as_ref().unwrap();
     assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].clear_stage, Some(ClearScanStage::After));
+    assert_eq!(entries[1].clear_stage, Some(ClearScanStage::Before));
+    assert!(entries[1].matches("before clear"));
     let later = entries[0].path.clone();
     let earlier = entries[1].path.clone();
     app.scan_history.select(later.clone()).unwrap();
@@ -2591,6 +2646,7 @@ fn every_new_page_renders_in_compact_and_large_windows() {
                     "Read codes",
                     "P0133",
                     "Before clear",
+                    "Save follow-up scan",
                     "Recheck codes and readiness",
                     "All codes",
                     "Stored · No current results · 1 unverified",

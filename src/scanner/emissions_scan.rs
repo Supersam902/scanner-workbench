@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use super::codes;
-use super::model::{Sample, ScanEvent, unavailable, valid_vin};
+use super::model::{ClearScanStage, Sample, ScanEvent, unavailable, valid_vin};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum State {
@@ -216,6 +216,8 @@ pub struct Scan {
     pub(super) started_ms: u64,
     pub(super) state: State,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) clear_stage: Option<ClearScanStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) ended_ms: Option<u64>,
     results: [Option<CheckResult>; 5],
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,6 +232,7 @@ impl Scan {
             *slot = Some(Self {
                 started_ms: sample.at_ms,
                 state: State::Running,
+                clear_stage: sample.clear_scan_stage,
                 ended_ms: None,
                 results: Default::default(),
                 drive_cycle: None,

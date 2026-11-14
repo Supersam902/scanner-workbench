@@ -218,6 +218,8 @@ pub struct Workbench {
     results: Results,
     scanning_emissions: bool,
     latest_scan: Option<Arc<Snapshot>>,
+    before_clear_scan: Option<(PathBuf, Arc<Snapshot>)>,
+    clear_baseline: Option<PathBuf>,
     scan_history: scan_history::History,
     scan_review: Option<scan_review::Review>,
     scan_recovery_dir: String,
@@ -373,6 +375,8 @@ impl Workbench {
             results: Results::default(),
             scanning_emissions: false,
             latest_scan: None,
+            before_clear_scan: None,
+            clear_baseline: None,
             scan_history: Default::default(),
             scan_review: None,
             scan_recovery_dir: String::new(),
@@ -471,7 +475,7 @@ impl Workbench {
         if self.adapter_connect.take().is_some() {
             self.connection_error = Some("Connection cancelled.".into());
         }
-        self.finish_emissions_scan(true);
+        let _ = self.finish_emissions_scan(true);
         self.stop_live();
         self.cancel.store(true, Ordering::Relaxed);
         if let Some(cancel_vin) = self.vin_request.take() {
@@ -554,6 +558,8 @@ impl Workbench {
         self.results = Results::default();
         self.frame_ecu = None;
         self.latest_scan = None;
+        self.before_clear_scan = None;
+        self.clear_baseline = None;
         self.graph_signals = None;
         self.monitor_support = None;
         self.oxygen_support = Default::default();
@@ -768,6 +774,7 @@ impl Workbench {
         });
         self.clearing = sent && clear_requested;
         if self.clearing {
+            self.clear_baseline = self.before_clear_scan.take().map(|(path, _)| path);
             self.apply_sample(Sample {
                 at_ms: self.now(),
                 clear_requested: true,
@@ -839,8 +846,14 @@ impl Workbench {
         self.dispatch(self.code_queries(), None, ReadMode::Scan);
     }
     fn read_emissions_scan(&mut self) {
+        self.capture_emissions_scan(None);
+    }
+    fn capture_emissions_scan(&mut self, stage: Option<ClearScanStage>) {
         if !self.connected || self.busy || self.playback.is_some() {
             return;
+        }
+        if stage == Some(ClearScanStage::Before) {
+            self.before_clear_scan = None;
         }
         let mut queries = vec![self.base_query(1, Some(1)), self.base_query(1, Some(0x41))];
         queries.extend(self.code_queries());
@@ -853,6 +866,7 @@ impl Workbench {
             self.apply_sample(Sample {
                 at_ms: self.now(),
                 emissions_scan: Some(ScanEvent::Started),
+                clear_scan_stage: stage,
                 ..Default::default()
             });
         }
@@ -863,9 +877,9 @@ impl Workbench {
                 || !self.results.failures.is_empty()
                 || self.results.emissions_scan.is_some())
     }
-    fn finish_emissions_scan(&mut self, interrupted: bool) {
+    fn finish_emissions_scan(&mut self, interrupted: bool) -> Option<String> {
         if !std::mem::take(&mut self.scanning_emissions) {
-            return;
+            return None;
         }
         self.apply_sample(Sample {
             at_ms: self.now(),
@@ -876,23 +890,58 @@ impl Workbench {
             }),
             ..Default::default()
         });
-        let Some(snapshot) = Snapshot::from_emissions_scan(&self.vehicle, self.demo, &self.results)
-        else {
-            return;
-        };
+        let snapshot = Snapshot::from_emissions_scan(&self.vehicle, self.demo, &self.results)?;
+        let stage = snapshot.emissions_scan.as_ref()?.clear_stage;
         let snapshot = Arc::new(snapshot);
         self.latest_scan = Some(snapshot.clone());
-        self.scan_history
-            .archive(&self.root.join("scans"), snapshot);
+        let directory = self.root.join("scans");
+        let path = self.scan_history.archive(&directory, snapshot.clone());
         if let Some(error) = &self.scan_history.save_error {
             self.log(format!("Could not save the emissions scan. {error}"));
+        }
+        if interrupted {
+            return match (stage, path) {
+                (Some(_), Some(_)) => Some("Scan interrupted. Partial results saved.".into()),
+                (Some(_), None) => {
+                    Some("Scan interrupted. Open Scan history to retry saving.".into())
+                }
+                _ => None,
+            };
+        }
+        match (stage, path) {
+            (Some(ClearScanStage::Before), Some(path)) => {
+                self.before_clear_scan = Some((path, snapshot));
+                Some(
+                    "Before-clear scan saved. Review it or open Clear emissions codes again."
+                        .into(),
+                )
+            }
+            (Some(ClearScanStage::After), Some(path)) => {
+                let result = self.scan_history.select(path).and_then(|()| {
+                    if let Some(before) = &self.clear_baseline {
+                        self.scan_history.compare_with(before.clone())
+                    } else {
+                        Ok(())
+                    }
+                });
+                self.page = Page::ScanHistory;
+                Some(match result {
+                    Ok(()) if self.clear_baseline.is_some() => {
+                        "Follow-up scan saved. Before / after comparison ready.".into()
+                    }
+                    Ok(()) => "Follow-up scan saved. Review the results in Scan history.".into(),
+                    Err(error) => format!("Follow-up scan saved. {error}"),
+                })
+            }
+            (Some(_), None) => Some("Scan could not be saved. Open Scan history to retry.".into()),
+            _ => None,
         }
     }
 
     fn prepare_to_close(&mut self, ctx: &egui::Context) {
         if self.scanning_emissions {
             self.cancel.store(true, Ordering::Relaxed);
-            self.finish_emissions_scan(true);
+            let _ = self.finish_emissions_scan(true);
         }
         self.scan_history.retry_saves();
         self.finish_recording();
@@ -924,9 +973,19 @@ impl Workbench {
         self.dispatch(queries, None, ReadMode::Scan);
     }
     fn recheck_after_clear(&mut self) {
-        let mut queries = self.code_queries();
-        queries.push(self.base_query(1, Some(1)));
+        let mut queries = vec![self.base_query(1, Some(1))];
+        queries.extend(self.code_queries());
         self.dispatch(queries, None, ReadMode::Scan);
+    }
+    fn capture_follow_up(&mut self) {
+        if self.results.clear_attempt_ms().is_some() {
+            self.capture_emissions_scan(Some(ClearScanStage::After));
+        }
+    }
+    fn confirm_emissions_clear(&mut self) {
+        if self.confirm_clear && self.clear_ready && self.connected && !self.busy {
+            self.dispatch(vec![self.base_query(4, None)], None, ReadMode::Control);
+        }
     }
     fn pid_availability(&self, q: &Query) -> PidAvailability {
         match (q.bytes.as_slice(), q.target) {
@@ -1253,7 +1312,9 @@ impl Workbench {
                         self.next_live = Instant::now() + Duration::from_secs_f32(self.interval);
                         continue;
                     }
-                    self.finish_emissions_scan(self.cancel.load(Ordering::Relaxed));
+                    let text = self
+                        .finish_emissions_scan(self.cancel.load(Ordering::Relaxed))
+                        .unwrap_or(text);
                     self.busy = false;
                     self.clearing = false;
                     self.log(text.clone());
@@ -1727,7 +1788,7 @@ impl Workbench {
 impl Drop for Workbench {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
-        self.finish_emissions_scan(true);
+        let _ = self.finish_emissions_scan(true);
         self.scan_history.retry_saves();
         self.finish_recording();
         let _ = self.tx.try_send(Command::Shutdown);
