@@ -1,6 +1,6 @@
 # Scanner Workbench
 
-Scanner Workbench is a generic OBD-II scan tool for Windows that works with a wide range of adapters. Connect with an ELM327-compatible USB, Bluetooth serial, or Wi-Fi/TCP adapter, or with a compatible J2534 pass-through interface. Read trouble codes, emissions readiness, freeze frames, VIN, and live data.
+Scanner Workbench is a Windows scan tool for generic OBD-II diagnostics. It supports common ELM327-compatible USB, Bluetooth Classic serial, and Wi-Fi (TCP) adapters, plus J2534 pass-through interfaces with a compatible Windows driver. Read trouble codes, emissions readiness, freeze frames, VIN, and live data.
 
 **[Download the Windows installer](https://github.com/Supersam902/scanner-workbench/releases/latest/download/ScannerWorkbenchApp-win-x86-Setup.exe)** · [Portable ZIP and release notes](https://github.com/Supersam902/scanner-workbench/releases/latest)
 
@@ -9,11 +9,11 @@ Scanner Workbench is a generic OBD-II scan tool for Windows that works with a wi
 | Adapter type | What to look for |
 | --- | --- |
 | ELM327-compatible USB | A Windows COM port when plugged in |
-| ELM327-compatible Bluetooth serial (SPP) | A Windows COM port after pairing |
-| ELM327-compatible Wi-Fi | A TCP host and port in the adapter's instructions |
+| ELM327-compatible Bluetooth Classic serial (SPP) | A Windows COM port after pairing |
+| ELM327-compatible Wi-Fi | An adapter that accepts ELM327 commands over TCP, with a host and port in its instructions |
 | J2534 pass-through | A vendor-supplied 32-bit Windows J2534 04.04 driver |
 
-Open **Connection → Adapter** to choose the adapter type. J2534 uses the vendor's **32-bit Windows 04.04 driver** and detects supported cables automatically. For ELM serial, choose the adapter's COM port. For Wi-Fi/TCP, enter the host and port specified by the adapter. Workbench saves your choice for **Connect** and the DLC voltage readout. It verifies an OBD-II reply before showing the vehicle as connected.
+Open **Connection → Adapter** to choose the adapter type. For J2534, install the vendor's **32-bit Windows 04.04 driver** and use **Automatic** to find an available interface. For USB and Bluetooth Classic serial, choose the adapter's COM port. For Wi-Fi, enter the adapter's TCP host and port. Workbench saves your choice for **Connect** and the DLC voltage readout. It verifies an OBD-II reply before showing the vehicle as connected.
 
 Use **Copy connection report** under **Connection → Adapter** to share the adapter settings, voltage at Connect, and protocol results when troubleshooting.
 
