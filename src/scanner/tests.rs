@@ -4040,7 +4040,7 @@ fn supported_live_selection_and_graph_buttons_have_no_six_signal_limit() {
         .results
         .rows
         .iter()
-        .find(|(_, value)| value.minimum.is_some())
+        .find(|(_, value)| value.minimum.is_some() && !value.history.is_empty())
         .map(|(key, value)| (key.clone(), value.latest.reading.name.clone()))
         .unwrap();
     let text = |output: &egui::FullOutput, label: &str| {
@@ -4069,7 +4069,7 @@ fn supported_live_selection_and_graph_buttons_have_no_six_signal_limit() {
         .results
         .rows
         .iter()
-        .filter(|(_, value)| value.minimum.is_some())
+        .filter(|(_, value)| value.minimum.is_some() && !value.history.is_empty())
         .map(|(key, _)| key.clone())
         .collect();
     assert!(all.len() > 6);
@@ -4079,6 +4079,43 @@ fn supported_live_selection_and_graph_buttons_have_no_six_signal_limit() {
         }
     }
     assert_eq!(app.graph_signals.as_ref().unwrap().len(), all.len());
+    let monitor = Reading {
+        source: Some(0x7e8),
+        request: "0621".into(),
+        name: "Scan-only monitor".into(),
+        value: "100".into(),
+        numeric: Some(100.0),
+        unit: "kilopascal".into(),
+        raw: "4621".into(),
+        status: "PASS".into(),
+        signal_failure: false,
+    };
+    let monitor_key = row_key(&monitor);
+    app.apply_sample(Sample {
+        at_ms: 10_000,
+        rows: vec![monitor],
+        ..Default::default()
+    });
+    assert!(app.results.rows[&monitor_key].history.is_empty());
+    app.graph_signals = Some(vec![]);
+    // Keep the chart controls in view while retaining all recorded signals.
+    app.selected = BTreeSet::from(["OBD:010D".into()]);
+    draw(&mut app, vec![]);
+    let output = draw(&mut app, vec![]);
+    let pointer = text(&output, "Graph all").unwrap().center();
+    let click = |pressed| egui::Event::PointerButton {
+        pos: pointer,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    draw(
+        &mut app,
+        vec![egui::Event::PointerMoved(pointer), click(true)],
+    );
+    draw(&mut app, vec![click(false)]);
+    assert_eq!(app.graph_signals.as_ref().unwrap().len(), all.len());
+    assert!(!app.graph_signals.as_ref().unwrap().contains(&monitor_key));
     app.graphs = false;
     app.selected.clear();
     app.auto_select_live = false;

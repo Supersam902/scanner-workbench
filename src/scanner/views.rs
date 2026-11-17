@@ -1989,7 +1989,7 @@ impl Workbench {
             .results
             .rows
             .iter()
-            .filter(|(_, value)| value.minimum.is_some())
+            .filter(|(_, value)| value.minimum.is_some() && !value.history.is_empty())
             .map(|(key, value)| (key.as_str(), graphs::signal_title(&value.latest.reading)))
             .collect();
         let selected = graph_selection(
