@@ -2813,6 +2813,117 @@ fn playback_seek_resets_incremental_cursor_and_failed_save_retains_capture() {
 }
 
 #[test]
+fn connect_opens_trouble_codes_and_queues_one_readiness_and_code_sweep() {
+    let folder = tempfile::tempdir().unwrap();
+    let (tx, commands) = worker::CommandSender::test_channel();
+    let (events, rx) = mpsc::channel();
+    let mut app = Workbench::with_worker(folder.path().to_owned(), |_, _| (tx, rx));
+    app.page = Page::Connection;
+    app.code_category = Some(codes::Category::Pending);
+    app.readiness_period = ReadinessPeriod::DriveCycle;
+
+    app.connect();
+    let failed = app.epoch;
+    assert!(matches!(commands.try_recv(), Ok(Command::Connect { id, .. }) if id == failed));
+    events
+        .send(Event::Failed(failed, "No vehicle reply".into()))
+        .unwrap();
+    app.tick();
+    assert_eq!(app.page, Page::Connection);
+    assert!(!app.connected && commands.try_recv().is_err());
+
+    app.connect();
+    let connection = app.epoch;
+    assert!(matches!(commands.try_recv(), Ok(Command::Connect { id, .. }) if id == connection));
+    assert_eq!(app.page, Page::Connection);
+    assert!(commands.try_recv().is_err());
+    let connected = || Event::Connected {
+        id: connection,
+        driver: Some("J2534 adapter".into()),
+        protocol: CanProtocol::Can11Bit500K.label().into(),
+        demo: false,
+        pid_support: PidSupport::default(),
+    };
+    events.send(connected()).unwrap();
+    events.send(connected()).unwrap();
+    app.tick();
+    assert_eq!(app.page, Page::Codes);
+    assert_eq!(app.code_category, None);
+    assert_eq!(app.readiness_period, ReadinessPeriod::SinceClear);
+    assert!(app.connected && app.busy && !app.connecting);
+    assert_eq!(app.status, "Reading trouble codes and readiness…");
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::Read { id, mode: ReadMode::Identify, .. }) if id == connection
+    ));
+    let Ok(Command::Read {
+        id: sweep,
+        queries,
+        discovery: None,
+        mode: ReadMode::Scan,
+        ..
+    }) = commands.try_recv()
+    else {
+        panic!("expected one combined diagnostic operation");
+    };
+    let requests: Vec<_> = queries.iter().map(|query| query.bytes.as_slice()).collect();
+    assert_eq!(requests, [&[1, 1][..], &[3], &[7], &[10], &[1, 0x41]]);
+    assert!(queries.iter().all(|query| query.target.is_none()));
+    assert_eq!(app.connection_id, Some(connection));
+    assert_eq!(app.epoch, sweep);
+    assert!(commands.try_recv().is_err());
+
+    events
+        .send(Event::InitialVin(
+            connection,
+            vec![Reading {
+                request: "0902".into(),
+                name: "VIN".into(),
+                ..reading("JTDBR32E720123456", None)
+            }],
+        ))
+        .unwrap();
+    events
+        .send(Event::Rows(
+            sweep,
+            vec![Reading {
+                request: "03".into(),
+                name: "Stored emissions codes".into(),
+                ..reading("P0133", None)
+            }],
+        ))
+        .unwrap();
+    app.tick();
+    assert_eq!(app.observed_vin.as_deref(), Some("JTDBR32E720123456"));
+    assert!(app.busy);
+    let render = render_context().run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 640.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| app.draw(ctx),
+    );
+    for label in ["Trouble codes", "P0133", "View readiness"] {
+        assert!(
+            render.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == label)
+            }),
+            "Missing {label}"
+        );
+    }
+    events
+        .send(Event::Finished(sweep, "Operation finished.".into()))
+        .unwrap();
+    app.tick();
+    assert!(app.connected && !app.busy);
+    assert_eq!(app.page, Page::Codes);
+    assert!(commands.try_recv().is_err());
+}
+
+#[test]
 fn a_new_vehicle_connection_does_not_reuse_previous_vehicle_identity() {
     let mut app = Workbench::new(temp("new-vehicle"));
     app.vehicle = vehicle();

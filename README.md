@@ -13,7 +13,7 @@ Scanner Workbench is a Windows scan tool for generic OBD-II diagnostics. It supp
 | ELM327-compatible Wi-Fi | An adapter that accepts ELM327 commands over TCP, with a host and port in its instructions |
 | J2534 pass-through | A vendor-supplied 32-bit Windows J2534 04.04 driver |
 
-Open **Connection → Adapter** to choose the adapter type. For J2534, install the vendor's **32-bit Windows 04.04 driver** and use **Automatic** to find an available interface. For USB and Bluetooth Classic serial, choose the adapter's COM port. For Wi-Fi, enter the adapter's TCP host and port. Workbench saves your choice for **Connect** and the DLC voltage readout. It verifies an OBD-II reply before showing the vehicle as connected.
+Open **Connection → Adapter** to choose the adapter type. For J2534, install the vendor's **32-bit Windows 04.04 driver** and use **Automatic** to find an available interface. For USB and Bluetooth Classic serial, choose the adapter's COM port. For Wi-Fi, enter the adapter's TCP host and port. Workbench saves your choice for **Connect** and the DLC voltage readout. Once it verifies an OBD-II reply, **Connect** opens **Trouble codes** and reads stored, pending, and permanent codes and both readiness periods in one sweep. Choose **View readiness** to see the monitor results.
 
 Use **Copy connection report** under **Connection → Adapter** to share the adapter settings, voltage at Connect, and protocol results when troubleshooting.
 

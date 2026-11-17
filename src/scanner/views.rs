@@ -1427,6 +1427,9 @@ impl Workbench {
             if action(ui, "Read codes", self.connected && !self.busy) {
                 self.read_codes();
             }
+            if ui.link("View readiness").clicked() {
+                self.page = Page::Emissions;
+            }
             if ui
                 .add_enabled(
                     self.connected && !self.busy,
@@ -1556,12 +1559,13 @@ impl Workbench {
         });
         let mut open_frame = None;
         if rows.is_empty() {
-            if !self
-                .results
-                .failures
-                .values()
-                .any(|v| visible_request(&v.reading.request))
+            if !self.busy
                 && selected.is_none()
+                && !self
+                    .results
+                    .failures
+                    .values()
+                    .any(|v| visible_request(&v.reading.request))
             {
                 caption(ui, "Read codes to see results by ECU.");
             }

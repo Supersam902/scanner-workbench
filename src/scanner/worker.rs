@@ -386,6 +386,19 @@ pub struct CommandSender {
 }
 
 impl CommandSender {
+    #[cfg(test)]
+    pub(super) fn test_channel() -> (Self, mpsc::Receiver<Command>) {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let sender = Self {
+            sender,
+            activity: Default::default(),
+            shutdown: Default::default(),
+            #[cfg(windows)]
+            thread: std::thread::spawn(|| {}),
+        };
+        (sender, receiver)
+    }
+
     #[cfg(windows)]
     pub(super) fn is_stopped(&self) -> bool {
         self.thread.is_finished()

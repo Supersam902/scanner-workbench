@@ -1025,6 +1025,19 @@ impl Workbench {
     fn read_codes(&mut self) {
         self.dispatch(self.code_queries(), None, ReadMode::Scan);
     }
+    fn scan_after_connect(&mut self) {
+        self.page = Page::Codes;
+        self.code_category = None;
+        self.readiness_period = ReadinessPeriod::SinceClear;
+        // Read the per-ECU confirmed-code counts before Mode 03 can omit an ECU.
+        let mut queries = vec![self.base_query(1, Some(1))];
+        queries.extend(self.code_queries());
+        queries.push(self.base_query(1, Some(0x41)));
+        self.dispatch(queries, None, ReadMode::Scan);
+        if self.busy {
+            self.status = "Reading trouble codes and readiness…".into();
+        }
+    }
     fn read_emissions_scan(&mut self) {
         self.capture_emissions_scan(None);
     }
@@ -1311,7 +1324,8 @@ impl Workbench {
                         self.disconnect();
                         continue;
                     }
-                    if !demo && self.adapter_connect.take() == Some(id) {
+                    let scan_on_connect = !demo && self.adapter_connect.take() == Some(id);
+                    if scan_on_connect {
                         self.finish_connection_report(format!("Vehicle connected · {protocol}"));
                     }
                     if !demo {
@@ -1336,7 +1350,7 @@ impl Workbench {
                     self.status = if demo {
                         "Practice mode. Diagnostic results are simulated."
                     } else {
-                        "Vehicle connected. Read codes, open live data, or check readiness."
+                        "Vehicle connected."
                     }
                     .into();
                     if !demo {
@@ -1356,6 +1370,9 @@ impl Workbench {
                         }
                     }
                     self.log(self.status.clone());
+                    if scan_on_connect {
+                        self.scan_after_connect();
+                    }
                 }
                 Event::Voltage(value) => {
                     if value.as_ref().is_some_and(|sample| match &sample.adapter {

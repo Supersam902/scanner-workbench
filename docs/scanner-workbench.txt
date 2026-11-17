@@ -10,6 +10,9 @@ Windows 32-bit build, November 13, 2026, revision 26
    Leave the baud rate blank to detect it. For ELM-compatible Wi-Fi / TCP,
    enter the host and port from the adapter's instructions. Click Connect
    at the top. Workbench verifies an OBD-II reply before showing a connection.
+   Trouble codes opens automatically. Workbench reads stored, pending and
+   permanent trouble codes and both readiness periods in one sweep.
+   Choose View readiness to see monitor results by ECU. Use Stop to end the sweep.
    After Connect, the VIN field beside DLC voltage shows the VIN received
    from the vehicle. Hover to highlight it, then click to copy it. The field
    displays Copied briefly. If the VIN is unavailable, use Read VIN under
