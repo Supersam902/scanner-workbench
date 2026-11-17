@@ -173,12 +173,14 @@ impl Workbench {
             return;
         }
         self.draw(ctx);
-        if self.profile_dialog.is_some() {
+        let profile_open = self.profile_dialog.is_some();
+        if profile_open {
             self.show_profile_dialog(ctx);
-            return;
         }
         #[cfg(windows)]
-        self.show_startup_update(ctx, now);
+        if !profile_open {
+            self.show_startup_update(ctx, now);
+        }
     }
 
     pub(super) fn draw(&mut self, ctx: &egui::Context) {
