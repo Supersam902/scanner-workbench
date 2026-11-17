@@ -478,6 +478,32 @@ fn show_issues(ui: &mut Ui, snapshot: &Snapshot, request: &'static str) -> bool 
 }
 
 impl Workbench {
+    #[cfg(windows)]
+    pub(super) fn save_scan_notes_for_update(&mut self) -> bool {
+        let Some(review) = self
+            .scan_review
+            .as_mut()
+            .filter(|review| review.has_unsaved_notes())
+        else {
+            return true;
+        };
+        if !review.save_notes() {
+            self.page = Page::ScanReview;
+            self.status = format!(
+                "Update waiting. {}",
+                review
+                    .notes_error
+                    .as_deref()
+                    .unwrap_or("Could not save the scan notes.")
+            );
+            return false;
+        }
+        if let (Some(path), Some(notes)) = (&review.path, &review.saved_notes) {
+            self.scan_history.record_work_order(path, &notes.work_order);
+        }
+        true
+    }
+
     pub(super) fn scan_review(&mut self, ui: &mut Ui) {
         let Some(review) = self.scan_review.as_mut() else {
             caption(ui, "Choose a scan from Scan history or Overview.");
@@ -516,5 +542,41 @@ impl Workbench {
                 open_local(&path);
             }
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_note_save_preserves_a_draft_when_another_window_is_saving() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("scan.json");
+        let snapshot = Arc::new(Snapshot {
+            vehicle: Default::default(),
+            demo: true,
+            at_ms: 1000,
+            rows: vec![],
+            failures: vec![],
+            clear_requested_at_ms: None,
+            emissions_scan: None,
+        });
+        super::super::model::save_json(&path, snapshot.as_ref()).unwrap();
+        let evidence = std::fs::read(&path).unwrap();
+        let mut review = Review::new(snapshot, Some(path.clone()), Page::ScanHistory);
+        review.draft_notes.work_order = "WO-UPDATE".into();
+        review.draft_notes.technician = "Readings saved before updating".into();
+        let mut app = Workbench::new(folder.path().join("data"));
+        app.scan_review = Some(review);
+        let lock = super::super::model::lock_file(&path.with_extension("notes.lock")).unwrap();
+        assert!(!app.save_scan_notes_for_update());
+        assert!(app.scan_review.as_ref().unwrap().has_unsaved_notes());
+        assert_eq!(app.page, Page::ScanReview);
+        drop(lock);
+        assert!(app.save_scan_notes_for_update());
+        assert!(!app.scan_review.as_ref().unwrap().has_unsaved_notes());
+        assert_eq!(scan_notes::load(&path).unwrap().work_order, "WO-UPDATE");
+        assert_eq!(std::fs::read(path).unwrap(), evidence);
     }
 }

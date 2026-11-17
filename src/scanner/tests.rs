@@ -3344,6 +3344,213 @@ fn startup_splash_loads_the_workbench_photo_and_expires() {
     assert!(!app.splash.visible(start + Duration::from_secs(1)));
 }
 
+#[cfg(windows)]
+#[test]
+fn startup_update_can_be_deferred_and_restarts_after_five_seconds() {
+    let folder = tempfile::tempdir().unwrap();
+    let (tx, commands) = worker::CommandSender::test_channel();
+    let (_, rx) = mpsc::channel();
+    let mut app = Workbench::with_worker(folder.path().join("data"), |_, _| (tx, rx));
+    app.updates = Some(updates::Updates::test_ready(&folder.path().join("install")));
+    let ctx = render_context();
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0));
+    let draw = |app: &mut Workbench, now, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                if !app.show_startup_update(ctx, now) {
+                    app.draw(ctx);
+                }
+            },
+        )
+    };
+    let text = |output: &egui::FullOutput, label: &str| {
+        output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == label => {
+                Some(text.visual_bounding_rect())
+            }
+            _ => None,
+        })
+    };
+    let start = Instant::now();
+    draw(&mut app, start, vec![]);
+    let output = draw(&mut app, start, vec![]);
+    for label in [
+        "Update ready",
+        "Restarting in 5 seconds…",
+        "Update now",
+        "Later",
+    ] {
+        assert!(text(&output, label).is_some(), "Missing {label}");
+    }
+    assert!(app.restarting_for_update.is_none());
+    let pointer = text(&output, "Later").unwrap().center();
+    let click = |pressed| egui::Event::PointerButton {
+        pos: pointer,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    draw(
+        &mut app,
+        start,
+        vec![egui::Event::PointerMoved(pointer), click(true)],
+    );
+    draw(&mut app, start, vec![click(false)]);
+    let deferred = draw(&mut app, start + Duration::from_secs(8), vec![]);
+    assert!(text(&deferred, "Restarting…").is_none());
+    assert!(app.update_ready() && app.restarting_for_update.is_none());
+    let badge = text(&deferred, "Update ready").unwrap();
+    assert!(deferred.shapes.iter().any(|shape| {
+        matches!(&shape.shape, egui::Shape::Rect(rect)
+            if rect.fill == appearance::ACCENT && rect.rect.contains_rect(badge))
+    }));
+    assert!(commands.try_recv().is_err());
+
+    app.startup_update = updates::StartupUpdate::default();
+    app.busy = true;
+    assert!(!app.show_startup_update(&ctx, start + Duration::from_secs(9)));
+    app.busy = false;
+    assert!(!app.show_startup_update(&ctx, start + Duration::from_secs(10)));
+    app.startup_update = updates::StartupUpdate::default();
+    let next = start + Duration::from_secs(10);
+    draw(&mut app, next, vec![]);
+    draw(&mut app, next + Duration::from_millis(4999), vec![]);
+    assert!(app.restarting_for_update.is_none());
+    draw(&mut app, next + Duration::from_secs(5), vec![]);
+    assert!(app.restarting_for_update.is_some());
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::Disconnect { .. })
+    ));
+    assert!(matches!(commands.try_recv(), Ok(Command::Shutdown)));
+}
+
+#[cfg(windows)]
+#[test]
+fn update_action_stops_reads_and_saves_the_partial_scan_and_recording() {
+    let folder = tempfile::tempdir().unwrap();
+    let (tx, commands) = worker::CommandSender::test_channel();
+    let (_, rx) = mpsc::channel();
+    let mut app = Workbench::with_worker(folder.path().join("data"), |_, _| (tx, rx));
+    app.updates = Some(updates::Updates::test_ready(&folder.path().join("install")));
+    app.page = Page::Updates;
+    app.connected = true;
+    app.scanning_emissions = true;
+    let start = app.now();
+    app.recording = Some(Capture::new(vehicle(), false, start));
+    app.apply_sample(Sample {
+        at_ms: start,
+        emissions_scan: Some(ScanEvent::Started),
+        ..Default::default()
+    });
+    app.apply_sample(Sample {
+        at_ms: start + 1,
+        rows: vec![reading("800", Some(800.0))],
+        ..Default::default()
+    });
+    app.busy = true;
+    let active_read = app.cancel.clone();
+    let ctx = render_context();
+    let draw = |app: &mut Workbench, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    };
+    let output = draw(&mut app, vec![]);
+    let pointer = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text)
+                if text.galley.job.text == "Stop diagnostics and restart to update" =>
+            {
+                Some(text.visual_bounding_rect().center())
+            }
+            _ => None,
+        })
+        .expect("active diagnostics must have a restart action");
+    let click = |pressed| egui::Event::PointerButton {
+        pos: pointer,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    draw(
+        &mut app,
+        vec![egui::Event::PointerMoved(pointer), click(true)],
+    );
+    draw(&mut app, vec![click(false)]);
+    assert!(active_read.load(Ordering::Relaxed));
+    assert!(!app.connected && app.recording.is_none() && app.unsaved.is_none());
+    assert!(app.restarting_for_update.is_some());
+    let (path, snapshot) = app.latest_scan.as_ref().unwrap();
+    assert!(path.is_file());
+    assert_eq!(
+        snapshot.emissions_scan.as_ref().unwrap().state,
+        emissions_scan::State::Interrupted
+    );
+    assert_eq!(app.scan_history.pending_count(), 0);
+    assert_eq!(app.saved_recordings.len(), 1);
+    let recording: Capture = load_json(&app.saved_recordings[0].path).unwrap();
+    recording.validate().unwrap();
+    assert!(matches!(
+        recording.samples.last().unwrap().emissions_scan,
+        Some(ScanEvent::Interrupted)
+    ));
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::Disconnect { .. })
+    ));
+    assert!(matches!(commands.try_recv(), Ok(Command::Shutdown)));
+}
+
+#[cfg(windows)]
+#[test]
+fn update_save_failure_preserves_the_recording_for_recovery_and_retry() {
+    let folder = tempfile::tempdir().unwrap();
+    let (tx, commands) = worker::CommandSender::test_channel();
+    let (_, rx) = mpsc::channel();
+    let mut app = Workbench::with_worker(folder.path().join("data"), |_, _| (tx, rx));
+    app.updates = Some(updates::Updates::test_ready(&folder.path().join("install")));
+    std::fs::create_dir_all(&app.root).unwrap();
+    std::fs::write(app.root.join("recordings"), b"blocked destination").unwrap();
+    let mut recording = Capture::new(vehicle(), false, 1000);
+    recording.samples.push(sample(1000, "800", Some(800.0)));
+    app.unsaved = Some(recording);
+    let ctx = render_context();
+    app.restart_for_update(&ctx);
+    assert_eq!(app.page, Page::Recordings);
+    assert!(app.status.starts_with("Update waiting."));
+    assert!(app.unsaved.is_some() && app.update_ready() && app.restarting_for_update.is_none());
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::Disconnect { .. })
+    ));
+    assert!(commands.try_recv().is_err());
+    app.save_recording_to(folder.path().join("recovered.json"));
+    assert!(app.unsaved.is_none());
+    app.restart_for_update(&ctx);
+    assert!(app.restarting_for_update.is_some());
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::Disconnect { .. })
+    ));
+    assert!(matches!(commands.try_recv(), Ok(Command::Shutdown)));
+}
+
 #[test]
 fn every_new_page_renders_in_compact_and_large_windows() {
     fn visible(shapes: &[egui::epaint::ClippedShape], screen: egui::Rect, label: &str) -> bool {

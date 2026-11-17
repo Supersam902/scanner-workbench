@@ -50,10 +50,15 @@ Windows 32-bit build, November 13, 2026, revision 26
 
 Software updates
 If you installed Workbench from Setup, open Connection > Updates to check
-the running version and download progress. A ready update also appears in
-the navigation bar. Disconnect and save pending work before clicking
-Restart to update. Use Download Windows Setup from the portable build to
-enable automatic checks.
+the running version and download progress. At startup, a ready update opens a
+message with a five-second countdown and then restarts Workbench automatically.
+Choose Later to continue, or Update now to restart immediately.
+The orange Update ready button opens the update page. If diagnostics are
+running, choose Stop diagnostics and restart to update. Workbench stops reads,
+saves captured scans, recordings and edited scan notes, releases the adapter,
+then updates and restarts. If a save fails, the app opens the affected saved
+work so you can choose a writable location and retry.
+Use Download Windows Setup from the portable build to enable automatic checks.
 
 DLC voltage
 One readout at the top shows voltage at the vehicle's diagnostic connector.

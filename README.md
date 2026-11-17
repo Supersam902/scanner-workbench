@@ -26,7 +26,7 @@ Check that the adapter supports your vehicle's protocol. Workbench supports ISO 
 - **Trouble codes** can save a before-clear scan, confirm an emissions clear and save a follow-up scan. Scan history can compare scans that match the same vehicle.
 - **Reports** opens a print-ready scan report. Add a work order and technician notes from **Scan review → Notes**. Use **Export scan** and **Import scan** in Scan history to transfer a saved scan and notes in one file. Recordings also export to CSV.
 
-The installer checks the public GitHub release feed. Open **Connection → Updates** to check for an update or restart into a staged version. Vehicle data stays in `%LOCALAPPDATA%/ScannerWorkbench`.
+The installer checks the public GitHub release feed. A ready update at startup shows a five-second countdown, then updates and restarts Workbench. Choose **Later** to continue. The orange **Update ready** button opens **Connection → Updates**, where **Stop diagnostics and restart to update** saves captured work and releases the adapter before restarting. Vehicle data stays in `%LOCALAPPDATA%/ScannerWorkbench`.
 
 Use `--demo` for a practice session and `--data-dir PATH` for separate local storage. See the [Workbench guide](docs/scanner-workbench.txt) and [release documentation](docs/scanner-releases.md).
 

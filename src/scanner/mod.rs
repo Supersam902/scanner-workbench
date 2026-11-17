@@ -191,6 +191,8 @@ pub struct Workbench {
     updates: Option<updates::Updates>,
     #[cfg(windows)]
     restarting_for_update: Option<updates::ReadyUpdate>,
+    #[cfg(windows)]
+    startup_update: updates::StartupUpdate,
     splash: StartupSplash,
     driver: Option<String>,
     driver_override: Option<DriverInfo>,
@@ -391,6 +393,8 @@ impl Workbench {
             updates: None,
             #[cfg(windows)]
             restarting_for_update: None,
+            #[cfg(windows)]
+            startup_update: updates::StartupUpdate::default(),
             splash: StartupSplash::Hidden,
             driver: None,
             driver_override,
@@ -2040,12 +2044,30 @@ impl Workbench {
 
     #[cfg(windows)]
     fn restart_for_update(&mut self, ctx: &egui::Context) {
-        if self.update_restart_blocker().is_some() {
+        if !self.update_ready() {
+            return;
+        }
+        // Finish the current captures before releasing the adapter and stopping its worker.
+        self.disconnect();
+        self.save_recording();
+        self.scan_history.retry_saves();
+        if !self.save_scan_notes_for_update() {
+            return;
+        }
+        if self.unsaved.is_some() {
+            self.page = Page::Recordings;
+            self.status = "Update waiting. The recording could not be saved. Choose a writable location under Saved work.".into();
+            return;
+        }
+        if self.scan_history.pending_count() > 0 {
+            self.page = Page::ScanHistory;
+            self.status = "Update waiting. Save the pending scans from Scan history.".into();
             return;
         }
         let Some(update) = self.updates.as_mut().and_then(updates::Updates::take_ready) else {
             return;
         };
+        self.startup_update.dismiss();
         self.restarting_for_update = Some(update);
         let _ = self.tx.try_send(Command::Shutdown);
         ctx.request_repaint();
@@ -2076,6 +2098,8 @@ impl Workbench {
                 if let Some(updates) = &mut self.updates {
                     updates.fail(format!("Could not restart to update. {err}"));
                 }
+                self.page = Page::Updates;
+                self.status = "Update could not be applied. Open error details to retry.".into();
             }
         }
     }
@@ -2113,7 +2137,13 @@ impl eframe::App for Workbench {
             return;
         }
         if ctx.input(|input| input.viewport().close_requested()) {
+            #[cfg(windows)]
+            self.startup_update.dismiss();
             self.prepare_to_close(ctx);
+        }
+        #[cfg(windows)]
+        if self.show_startup_update(ctx, Instant::now()) {
+            return;
         }
         if self.splash.visible(Instant::now()) {
             appearance::splash(ctx);

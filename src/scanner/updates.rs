@@ -1,11 +1,12 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use velopack::bundle::Manifest;
 use velopack::download::{download_url_as_string, download_url_to_file};
 use velopack::locator::{LocationContext, VelopackLocator, auto_locate_app_manifest};
-#[cfg(feature = "scanner-update-smoke")]
+#[cfg(any(test, feature = "scanner-update-smoke"))]
 use velopack::sources::FileSource;
 use velopack::sources::UpdateSource;
 use velopack::{
@@ -15,6 +16,29 @@ use velopack::{
 const PACKAGE_ID: &str = "ScannerWorkbenchApp";
 const CHANNEL: &str = "win-x86";
 const EXECUTABLE: &str = "scanner-workbench.exe";
+const PENDING_UPDATE: &str = "scanner-workbench-pending.json";
+
+#[derive(Default)]
+pub(super) struct StartupUpdate {
+    deadline: Option<Instant>,
+    dismissed: bool,
+}
+
+impl StartupUpdate {
+    pub(super) fn remaining(&mut self, ready: bool, now: Instant) -> Option<u64> {
+        if self.dismissed || !ready {
+            return None;
+        }
+        let deadline = self.deadline.get_or_insert(now + Duration::from_secs(5));
+        let remaining = deadline.saturating_duration_since(now);
+        Some(remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0))
+    }
+
+    pub(super) fn dismiss(&mut self) {
+        self.dismissed = true;
+        self.deadline = None;
+    }
+}
 
 pub const REPOSITORY: Option<&str> = option_env!("SCANNER_WORKBENCH_UPDATE_REPOSITORY");
 
@@ -190,6 +214,36 @@ impl Updates {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn test_ready(root: &Path) -> Self {
+        let paths = velopack::locator::create_config_from_root_dir(root);
+        std::fs::create_dir_all(&paths.CurrentBinaryDir).unwrap();
+        std::fs::create_dir_all(&paths.PackagesDir).unwrap();
+        std::fs::write(&paths.UpdateExePath, b"test fixture, never executed").unwrap();
+        std::fs::write(&paths.ManifestPath, format!(
+            "<package><metadata><id>{PACKAGE_ID}</id><version>0.1.0</version><channel>{CHANNEL}</channel><mainExe>{EXECUTABLE}</mainExe><machineArchitecture>x86</machineArchitecture><os>win</os></metadata></package>"
+        )).unwrap();
+        let manager = UpdateManager::new(FileSource::new(root), None, Some(paths.clone())).unwrap();
+        let asset = VelopackAsset {
+            PackageId: PACKAGE_ID.into(),
+            Version: "1.2.3".into(),
+            Type: "Full".into(),
+            FileName: format!("{PACKAGE_ID}-1.2.3-{CHANNEL}-full.nupkg"),
+            SHA256: "0".repeat(64),
+            Size: 1,
+            ..Default::default()
+        };
+        let path = paths.PackagesDir.join(&asset.FileName);
+        Self {
+            state: State::Ready(ReadyUpdate {
+                manager,
+                asset,
+                path,
+            }),
+            events: None,
+        }
+    }
+
     pub(super) fn state(&self) -> &State {
         &self.state
     }
@@ -227,7 +281,9 @@ impl Updates {
         self.state = State::Checking;
         self.events = Some(rx);
         std::thread::spawn(move || {
-            let state = match stage(source) {
+            let state = match restore_pending()
+                .and_then(|cached| cached.map_or_else(|| stage(source), |update| Ok(Some(update))))
+            {
                 Ok(None) => State::Current,
                 Ok(Some(ready)) => State::Ready(ready),
                 Err(err) => {
@@ -293,6 +349,7 @@ fn stage(source: impl UpdateSource + 'static) -> Result<Option<ReadyUpdate>, Err
         let _lock = locator.try_get_exclusive_lock()?;
         match verify_package(&path, &asset) {
             Ok(()) => {
+                remember_pending(&locator, &asset);
                 return Ok(Some(ReadyUpdate {
                     manager,
                     asset,
@@ -314,11 +371,57 @@ fn stage(source: impl UpdateSource + 'static) -> Result<Option<ReadyUpdate>, Err
         None,
     )?;
     verify_package(&path, &asset)?;
+    remember_pending(&locator, &asset);
     Ok(Some(ReadyUpdate {
         manager,
         asset,
         path,
     }))
+}
+
+fn remember_pending(locator: &VelopackLocator, asset: &VelopackAsset) {
+    let path = locator.get_packages_dir().join(PENDING_UPDATE);
+    if let Err(error) = super::model::save_json(&path, asset) {
+        tracing::warn!(%error, "Could not remember the staged update");
+    }
+}
+
+fn restore_pending() -> Result<Option<ReadyUpdate>, Error> {
+    let Some(source) = github_source(None) else {
+        return Ok(None);
+    };
+    let (manager, locator) = manager(source)?;
+    Ok(read_pending(manager, &locator))
+}
+
+fn read_pending(manager: UpdateManager, locator: &VelopackLocator) -> Option<ReadyUpdate> {
+    let record = locator.get_packages_dir().join(PENDING_UPDATE);
+    let Ok(asset) = super::model::read_json::<VelopackAsset>(&record) else {
+        return None;
+    };
+    if !valid_asset(&asset) {
+        return None;
+    }
+    let installed = manager.get_current_version();
+    let newer = asset
+        .Version
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .cmp([installed.major, installed.minor, installed.patch])
+        .is_gt();
+    if !newer {
+        return None;
+    }
+    let path = locator.get_packages_dir().join(&asset.FileName);
+    if let Err(error) = verify_package(&path, &asset) {
+        tracing::warn!(%error, "Staged update needs to be downloaded again");
+        return None;
+    }
+    Some(ReadyUpdate {
+        manager,
+        asset,
+        path,
+    })
 }
 
 /// Exercises staging from a local or GitHub feed, with restart for local smoke tests.
@@ -343,6 +446,9 @@ pub fn verify_update(
         std::fs::write(output, super::VERSION)?;
         return Ok(());
     };
+    let locator = auto_locate_app_manifest(LocationContext::FromCurrentExe)?;
+    let ready = read_pending(ready.manager.clone(), &locator)
+        .ok_or_else(|| Error::Other("The staged update could not be restored.".into()))?;
     if apply && let Some(feed) = feed {
         ready.apply([
             OsString::from("--verify-local-update"),
@@ -359,6 +465,58 @@ pub fn verify_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_countdown_starts_when_ready_and_dismisses_for_the_session() {
+        let start = Instant::now();
+        let mut startup = StartupUpdate::default();
+        assert_eq!(startup.remaining(false, start), None);
+        let ready = start + Duration::from_secs(20);
+        assert_eq!(startup.remaining(true, ready), Some(5));
+        assert_eq!(
+            startup.remaining(true, ready + Duration::from_millis(999)),
+            Some(5)
+        );
+        assert_eq!(
+            startup.remaining(true, ready + Duration::from_secs(1)),
+            Some(4)
+        );
+        assert_eq!(
+            startup.remaining(true, ready + Duration::from_millis(4999)),
+            Some(1)
+        );
+        assert_eq!(
+            startup.remaining(true, ready + Duration::from_micros(4_999_999)),
+            Some(1)
+        );
+        assert_eq!(
+            startup.remaining(true, ready + Duration::from_secs(5)),
+            Some(0)
+        );
+        startup.dismiss();
+        assert_eq!(
+            startup.remaining(true, ready + Duration::from_secs(10)),
+            None
+        );
+    }
+
+    #[test]
+    fn cached_update_rejects_invalid_metadata_and_changed_package_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let updates = Updates::test_ready(root.path());
+        let State::Ready(ready) = updates.state else {
+            panic!("expected staged update")
+        };
+        let paths = velopack::locator::create_config_from_root_dir(root.path());
+        let locator = VelopackLocator::new(&paths).unwrap();
+        remember_pending(&locator, &ready.asset);
+        std::fs::write(&ready.path, b"x").unwrap();
+        assert!(read_pending(ready.manager.clone(), &locator).is_none());
+        let mut invalid = ready.asset;
+        invalid.FileName = "../scanner.exe".into();
+        remember_pending(&locator, &invalid);
+        assert!(read_pending(ready.manager, &locator).is_none());
+    }
 
     #[test]
     fn download_progress_keeps_the_check_active_until_its_result() {

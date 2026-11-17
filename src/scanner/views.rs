@@ -241,9 +241,12 @@ impl Workbench {
                         self.page = Page::ScanReview;
                     }
                     #[cfg(windows)]
-                    if self.page != Page::Updates
-                        && self.update_ready()
-                        && ui.link("Update ready").clicked()
+                    if self.update_ready()
+                        && ui
+                            .push_id("update_ready_navigation", |ui| {
+                                action(ui, "Update ready", true)
+                            })
+                            .inner
                     {
                         self.page = Page::Updates;
                     }
@@ -998,10 +1001,65 @@ impl Workbench {
     }
 
     #[cfg(windows)]
-    fn update_ready(&self) -> bool {
+    pub(super) fn update_ready(&self) -> bool {
         self.updates
             .as_ref()
             .is_some_and(|updates| matches!(updates.state(), updates::State::Ready(_)))
+    }
+
+    #[cfg(windows)]
+    pub(super) fn show_startup_update(&mut self, ctx: &egui::Context, now: Instant) -> bool {
+        if self.update_restart_blocker().is_some() {
+            self.startup_update.dismiss();
+            return false;
+        }
+        let Some(seconds) = self.startup_update.remaining(self.update_ready(), now) else {
+            return false;
+        };
+        let version = match self.updates.as_ref().map(updates::Updates::state) {
+            Some(updates::State::Ready(update)) => update.version().to_owned(),
+            _ => return false,
+        };
+        appearance::splash(ctx);
+        let response = egui::Modal::new(egui::Id::new("startup_update"))
+            .frame(
+                egui::Frame::popup(&ctx.style())
+                    .fill(SURFACE)
+                    .inner_margin(24)
+                    .corner_radius(10),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(400.0);
+                ui.label(appearance::title("Update ready", 27.0).color(ACCENT));
+                ui.add_space(8.0);
+                ui.label(format!("Scanner Workbench {version} is ready to install."));
+                ui.label("The application will update and restart automatically.");
+                ui.add_space(14.0);
+                ui.label(appearance::label(
+                    match seconds {
+                        0 => "Restarting…".into(),
+                        1 => "Restarting in 1 second…".into(),
+                        _ => format!("Restarting in {seconds} seconds…"),
+                    },
+                    21.0,
+                ));
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    let restart = action(ui, "Update now", true);
+                    let later = ui.button("Later").clicked();
+                    (restart, later)
+                })
+                .inner
+            });
+        let (restart, later) = response.inner;
+        if later || response.should_close() {
+            self.startup_update.dismiss();
+        } else if restart || seconds == 0 {
+            self.startup_update.dismiss();
+            self.restart_for_update(ctx);
+        }
+        ctx.request_repaint_after(Duration::from_millis(100));
+        true
     }
 
     fn update_controls(&mut self, ui: &mut egui::Ui) {
@@ -1027,7 +1085,7 @@ impl Workbench {
     fn installed_update_controls(&mut self, ui: &mut egui::Ui) {
         use super::updates::{REPOSITORY, State};
 
-        let blocker = self.update_restart_blocker();
+        let stopping = self.connected || self.busy || self.live;
         let Some(updates) = &mut self.updates else {
             caption(
                 ui,
@@ -1069,15 +1127,23 @@ impl Workbench {
                 );
             }
             State::Ready(update) => {
-                ui.colored_label(GREEN, format!("Version {} is ready", update.version()));
+                ui.ctx().request_repaint_after(Duration::from_millis(100));
+                ui.colored_label(ACCENT, format!("Version {} is ready", update.version()));
                 if ui
-                    .add_enabled(blocker.is_none(), egui::Button::new("Restart to update"))
-                    .clicked()
+                    .push_id("restart_ready_update", |ui| {
+                        action(
+                            ui,
+                            if stopping {
+                                "Stop diagnostics and restart to update"
+                            } else {
+                                "Restart to update"
+                            },
+                            true,
+                        )
+                    })
+                    .inner
                 {
                     self.restart_for_update(ui.ctx());
-                }
-                if let Some(message) = blocker {
-                    caption(ui, message);
                 }
             }
             State::Failed(message) => {
