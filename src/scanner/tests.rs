@@ -2015,6 +2015,192 @@ fn closing_keeps_unsaved_scans_available_for_recovery() {
 }
 
 #[test]
+fn clear_button_saves_the_report_before_sending_one_clear_request() {
+    let folder = tempfile::tempdir().unwrap();
+    let (tx, commands) = worker::CommandSender::test_channel();
+    let (events, rx) = mpsc::channel();
+    let mut app = Workbench::with_worker(folder.path().to_owned(), |_, _| (tx, rx));
+    app.connected = true;
+    app.page = Page::Codes;
+    app.apply_sample(sample(app.now(), "800", Some(800.0)));
+    let ctx = render_context();
+    let draw = |app: &mut Workbench, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    };
+    let output = draw(&mut app, vec![]);
+    let pointer = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == "Clear emissions codes" => {
+                Some(text.visual_bounding_rect().center())
+            }
+            _ => None,
+        })
+        .expect("clear action is available on the DTC page");
+    let click = |pressed| egui::Event::PointerButton {
+        pos: pointer,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    draw(
+        &mut app,
+        vec![egui::Event::PointerMoved(pointer), click(true)],
+    );
+    draw(&mut app, vec![click(false)]);
+    let Ok(Command::Read {
+        id,
+        mode: ReadMode::EmissionsScan,
+        queries,
+        ..
+    }) = commands.try_recv()
+    else {
+        panic!("clearing must first capture the evidence");
+    };
+    assert!(queries.iter().all(|query| query.bytes != [4]));
+    assert!(app.results.clear_attempt_ms().is_none() && commands.try_recv().is_err());
+    events
+        .send(Event::Rows(
+            id,
+            vec![Reading {
+                request: "03".into(),
+                name: "Stored codes".into(),
+                ..reading("P0133", None)
+            }],
+        ))
+        .unwrap();
+    events
+        .send(Event::Finished(id, "Scan finished".into()))
+        .unwrap();
+    app.tick();
+    let Ok(Command::Read {
+        id: clear,
+        mode: ReadMode::Control,
+        queries,
+        ..
+    }) = commands.try_recv()
+    else {
+        panic!("saved evidence must be followed by one clear request");
+    };
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].bytes, vec![4]);
+    let report = app.last_export.as_ref().unwrap();
+    assert_eq!(report.extension().unwrap(), "html");
+    assert!(std::fs::read_to_string(report).unwrap().contains("P0133"));
+    let data: Snapshot = load_json(&report.with_extension("json")).unwrap();
+    assert!(
+        data.rows
+            .iter()
+            .any(|row| row.reading.request == "010C" && row.reading.value == "800")
+    );
+    assert!(
+        data.rows
+            .iter()
+            .any(|row| row.reading.request == "03" && row.reading.value == "P0133")
+    );
+    assert!(data.clear_attempt_ms().is_none());
+    assert!(data.rows.iter().all(|row| row.reading.request != "04"));
+    assert!(app.clear_baseline.as_ref().unwrap().is_file());
+    assert!(app.clearing && app.results.clear_attempt_ms().is_some());
+    events
+        .send(Event::Finished(id, "Duplicate scan result".into()))
+        .unwrap();
+    app.tick();
+    assert_eq!(app.epoch, clear);
+    assert!(commands.try_recv().is_err());
+}
+
+#[test]
+fn clear_stops_when_saving_fails_or_the_user_cancels() {
+    for action in ["reports", "scans", "stop", "disconnect"] {
+        let folder = tempfile::tempdir().unwrap();
+        let (tx, commands) = worker::CommandSender::test_channel();
+        let (events, rx) = mpsc::channel();
+        let mut app = Workbench::with_worker(folder.path().to_owned(), |_, _| (tx, rx));
+        app.connected = true;
+        app.apply_sample(Sample {
+            at_ms: app.now(),
+            rows: vec![Reading {
+                request: "03".into(),
+                ..reading("P0133", None)
+            }],
+            ..Default::default()
+        });
+        if matches!(action, "reports" | "scans") {
+            std::fs::write(app.root.join(action), b"blocked destination").unwrap();
+        }
+        app.clear_emissions_codes();
+        let Ok(Command::Read {
+            id,
+            mode: ReadMode::EmissionsScan,
+            ..
+        }) = commands.try_recv()
+        else {
+            panic!("expected the evidence scan");
+        };
+        match action {
+            "stop" => app.stop_operation(),
+            "disconnect" => app.disconnect(),
+            _ => {}
+        }
+        events
+            .send(Event::Finished(id, "Scan finished".into()))
+            .unwrap();
+        app.tick();
+        assert!(app.results.clear_attempt_ms().is_none(), "{action}");
+        assert!(
+            commands.try_iter().all(|command| {
+                !matches!(
+                    command,
+                    Command::Read {
+                        mode: ReadMode::Control,
+                        ..
+                    }
+                )
+            }),
+            "{action}"
+        );
+        assert!(
+            app.results
+                .rows
+                .values()
+                .any(|row| row.latest.reading.value == "P0133")
+        );
+        if matches!(action, "reports" | "scans") {
+            assert!(app.status.contains("Clear stopped."), "{}", app.status);
+        }
+    }
+}
+
+#[test]
+fn save_report_writes_printable_and_comparison_files_without_a_vin() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut app = Workbench::new(folder.path().to_owned());
+    app.apply_sample(sample(app.now(), "800", Some(800.0)));
+    let path = app.save_report().unwrap();
+    assert_eq!(path.extension().unwrap(), "html");
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("Engine RPM")
+    );
+    let saved: Snapshot = load_json(&path.with_extension("json")).unwrap();
+    assert_eq!(saved, app.baseline.as_ref().unwrap().clone());
+    assert!(saved.vehicle.vin.is_empty());
+}
+
+#[test]
 fn saved_scan_comparison_prints_changes_after_clear_and_restart() {
     use scan_comparison::Assessment;
     let root = temp("compare-saved-scans");
@@ -2026,9 +2212,10 @@ fn saved_scan_comparison_prints_changes_after_clear_and_restart() {
         app.start_recording();
         app.capture_follow_up();
         assert!(!app.busy);
-        app.capture_emissions_scan(Some(ClearScanStage::Before));
+        app.clear_emissions_codes();
         pump(&mut app);
-        let (before_path, before) = app.before_clear_scan.clone().unwrap();
+        let before_path = app.clear_baseline.clone().unwrap();
+        let before: Snapshot = load_json(&before_path).unwrap();
         assert!(before_path.is_file());
         assert!(
             before
@@ -2043,16 +2230,11 @@ fn saved_scan_comparison_prints_changes_after_clear_and_restart() {
                 .any(|row| row.reading.request.starts_with("02"))
         );
         assert!(report(&before, None).contains("Before clear"));
-        assert!(app.results.clear_attempt_ms().is_none());
-        app.confirm_emissions_clear();
-        assert!(app.results.clear_attempt_ms().is_none());
-        app.confirm_clear = true;
-        app.confirm_emissions_clear();
-        assert!(app.results.clear_attempt_ms().is_none());
-        app.clear_ready = true;
-        app.confirm_emissions_clear();
-        assert!(app.clearing);
-        pump(&mut app);
+        assert!(app.results.clear_attempt_ms().is_some());
+        let saved = app.last_export.as_ref().unwrap();
+        assert_eq!(saved.extension().unwrap(), "html");
+        assert!(std::fs::read_to_string(saved).unwrap().contains("P0133"));
+        assert!(saved.with_extension("json").is_file());
         assert_eq!(app.clear_baseline.as_ref(), Some(&before_path));
         assert!(
             app.results
@@ -2359,7 +2541,7 @@ fn full_practice_workflow_scans_reads_records_replays_and_exports() {
         app.results.emissions_scan.as_ref().unwrap().state,
         emissions_scan::State::Finished,
     );
-    app.save_baseline();
+    app.save_report();
     assert!(app.baseline.is_some());
     app.dispatch(vec![app.base_query(4, None)], None, ReadMode::Control);
     assert!(app.clearing);
@@ -2411,13 +2593,13 @@ fn full_practice_workflow_scans_reads_records_replays_and_exports() {
     // Files are retained in the test's uniquely named temp folder for inspection.
 }
 #[test]
-fn stop_rejects_queued_old_events_and_cancels_clear_confirmation() {
+fn stop_rejects_queued_old_events_and_cancels_a_pending_clear() {
     let mut app = Workbench::new(temp("epoch"));
     let id = app.epoch;
-    app.confirm_clear = true;
+    app.clear_after_scan = Some(id);
     app.cancel_operation();
     assert_ne!(app.epoch, id);
-    assert!(!app.confirm_clear);
+    assert_eq!(app.clear_after_scan, None);
     assert!(!app.live);
     let (events, rx) = mpsc::channel();
     app.rx = rx;

@@ -299,7 +299,6 @@ impl Workbench {
                         Page::Updates => self.update_controls(ui),
                     });
             });
-        self.confirmations(ctx);
         self.show_live_preset_dialog(ctx);
     }
 
@@ -1499,27 +1498,20 @@ impl Workbench {
             if ui
                 .add_enabled(
                     self.connected && !self.busy,
-                    egui::Button::new(RichText::new("Clear emissions codes…").color(AMBER)),
+                    egui::Button::new(RichText::new("Clear emissions codes").color(AMBER)),
                 )
                 .clicked()
             {
-                self.stop_live();
-                self.confirm_clear = true;
-                self.clear_ready = false;
+                self.clear_emissions_codes();
             }
             if ui
-                .add_enabled(
-                    !self.results.rows.is_empty(),
-                    egui::Button::new("Save baseline"),
-                )
+                .add_enabled(self.can_export_report(), egui::Button::new("Save report"))
                 .clicked()
             {
-                self.save_baseline();
+                self.save_report();
             }
         });
-        if !self.confirm_clear
-            && let Some((path, snapshot)) = self.before_clear_scan.clone()
-        {
+        if let Some((path, snapshot)) = self.before_clear_scan.clone() {
             ui.horizontal_wrapped(|ui| {
                 caption(ui, "Before-clear scan saved");
                 if ui.link("Review before-clear scan").clicked() {
@@ -3087,8 +3079,8 @@ impl Workbench {
                 .desired_width(f32::INFINITY),
         );
         ui.horizontal_wrapped(|ui| {
-            if action(ui, "Save before baseline", !self.results.rows.is_empty()) {
-                self.save_baseline();
+            if action(ui, "Save report", self.can_export_report()) {
+                self.save_report();
             }
             if action(ui, "Print session report", self.can_export_report()) {
                 if let Some(path) = self.export_report() {
@@ -3101,14 +3093,15 @@ impl Workbench {
                 }
             }
         });
-        ui.collapsing("Load a saved baseline", |ui| {
-            let paths: Vec<_> = std::fs::read_dir(self.root.join("baselines"))
+        ui.collapsing("Load a saved report", |ui| {
+            let mut paths: Vec<_> = [self.root.join("reports"), self.root.join("baselines")]
                 .into_iter()
-                .flatten()
+                .flat_map(|directory| std::fs::read_dir(directory).into_iter().flatten())
                 .filter_map(Result::ok)
                 .map(|e| e.path())
                 .filter(|p| p.extension().is_some_and(|e| e == "json"))
                 .collect();
+            paths.sort_unstable();
             for path in paths.iter().rev().take(50) {
                 if ui
                     .button(path.file_name().unwrap_or_default().to_string_lossy())
@@ -3121,10 +3114,10 @@ impl Workbench {
                                 && b.demo == self.demo
                             {
                                 self.baseline = Some(b);
-                                self.status = "Baseline loaded.".into();
+                                self.status = "Report loaded for comparison.".into();
                             } else {
                                 self.status =
-                                    "Baseline belongs to another vehicle or data source.".into();
+                                    "Report belongs to another vehicle or data source.".into();
                             }
                         }
                         Err(e) => self.status = e,
@@ -3168,7 +3161,7 @@ impl Workbench {
             ui.add_space(16.0);
             caption(
                 ui,
-                "No baseline selected. The report can still export this session's readings and failures.",
+                "Save or load a report to compare it with later readings.",
             );
         }
         caption(
@@ -3829,48 +3822,6 @@ impl Workbench {
             .filter(|v| predicate(&v.reading))
         {
             reading_issue(ui, &value.reading);
-        }
-    }
-    fn confirmations(&mut self, ctx: &egui::Context) {
-        if self.confirm_clear {
-            egui::Window::new("Clear emissions diagnostic memory")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.set_max_width(490.0);
-                    ui.label("This sends generic Mode 04. It can erase stored emissions codes and freeze-frame evidence, and reset readiness monitors. Permanent codes are not directly erased.");
-                    ui.label(format!("Vehicle: {}", self.vehicle.label()));
-                    let before = self.before_clear_scan.clone();
-                    let left_dialog = ui.horizontal_wrapped(|ui| {
-                        if let Some((path, snapshot)) = before {
-                            caption(ui, "Before-clear scan saved");
-                            if ui.link("Review before-clear scan").clicked() {
-                                self.confirm_clear = false;
-                                self.open_scan_review(snapshot, Some(path), Page::Codes);
-                                return true;
-                            }
-                        }
-                        if ui.add_enabled(self.connected && !self.busy, egui::Button::new("Save before-clear scan")).clicked() {
-                            self.confirm_clear = false;
-                            self.capture_emissions_scan(Some(ClearScanStage::Before));
-                            return true;
-                        }
-                        false
-                    }).inner;
-                    if left_dialog {
-                        return;
-                    }
-                    ui.checkbox(&mut self.clear_ready, "I have saved the diagnostic evidence I need");
-                    ui.horizontal(|ui| {
-                        if action(ui, "Confirm clear", self.clear_ready && self.connected && !self.busy) {
-                            self.confirm_emissions_clear();
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.confirm_clear = false;
-                        }
-                    });
-                });
         }
     }
 }

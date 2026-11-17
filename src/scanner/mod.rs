@@ -284,8 +284,7 @@ pub struct Workbench {
     baseline: Option<Snapshot>,
     saved_recordings: Vec<recordings::SavedRecording>,
     last_export: Option<PathBuf>,
-    confirm_clear: bool,
-    clear_ready: bool,
+    clear_after_scan: Option<u64>,
     clearing: bool,
     readiness_period: ReadinessPeriod,
     code_category: Option<codes::Category>,
@@ -490,8 +489,7 @@ impl Workbench {
             baseline: None,
             saved_recordings: vec![],
             last_export: None,
-            confirm_clear: false,
-            clear_ready: false,
+            clear_after_scan: None,
             clearing: false,
             readiness_period: ReadinessPeriod::SinceClear,
             code_category: None,
@@ -543,6 +541,7 @@ impl Workbench {
         self.recording_list_offset = 0;
     }
     fn cancel_operation(&mut self) {
+        self.clear_after_scan = None;
         if self.adapter_connect.take().is_some() {
             let message = connection_report::CANCELLED;
             self.finish_connection_report(message);
@@ -560,7 +559,6 @@ impl Workbench {
         self.busy = false;
         self.poll_in_flight = false;
         self.connecting = false;
-        self.confirm_clear = false;
         self.clearing = false;
         self.progress = (0, 0, String::new());
     }
@@ -570,6 +568,7 @@ impl Workbench {
         }
     }
     fn stop_operation(&mut self) {
+        self.clear_after_scan = None;
         let was_live = self.live;
         self.stop_live();
         if self.busy {
@@ -928,7 +927,7 @@ impl Workbench {
         let polling = mode.is_poll();
         if !polling {
             self.stop_live();
-            self.confirm_clear = false;
+            self.clear_after_scan = None;
             self.progress = (0, queries.len(), String::new());
         }
         self.epoch += 1;
@@ -1109,10 +1108,7 @@ impl Workbench {
         match (stage, path) {
             (Some(ClearScanStage::Before), Some(path)) => {
                 self.before_clear_scan = Some((path, snapshot));
-                Some(
-                    "Before-clear scan saved. Review it or open Clear emissions codes again."
-                        .into(),
-                )
+                Some("Before-clear scan saved.".into())
             }
             (Some(ClearScanStage::After), Some(path)) => {
                 let result = self.scan_history.select(path).and_then(|()| {
@@ -1190,9 +1186,29 @@ impl Workbench {
             self.capture_emissions_scan(Some(ClearScanStage::After));
         }
     }
-    fn confirm_emissions_clear(&mut self) {
-        if self.confirm_clear && self.clear_ready && self.connected && !self.busy {
-            self.dispatch(vec![self.base_query(4, None)], None, ReadMode::Control);
+    fn clear_emissions_codes(&mut self) {
+        if !self.connected || self.busy || self.playback.is_some() {
+            return;
+        }
+        self.capture_emissions_scan(Some(ClearScanStage::Before));
+        if self.scanning_emissions {
+            self.clear_after_scan = Some(self.epoch);
+            self.status = "Saving a report before clearing emissions codes…".into();
+        }
+    }
+    fn clear_after_saved_report(&mut self) {
+        if self.before_clear_scan.is_none() {
+            self.page = Page::ScanHistory;
+            self.status = "The before-clear scan could not be saved. Clear stopped. Retry saving from Scan history.".into();
+            return;
+        }
+        if self.save_report().is_none() {
+            self.status = format!("Clear stopped. {}", self.status);
+            return;
+        }
+        self.dispatch(vec![self.base_query(4, None)], None, ReadMode::Control);
+        if self.clearing {
+            self.status = "Report saved. Clearing emissions codes…".into();
         }
     }
     fn pid_availability(&self, q: &Query) -> PidAvailability {
@@ -1526,13 +1542,16 @@ impl Workbench {
                         self.next_live = Instant::now() + Duration::from_secs_f32(self.interval);
                         continue;
                     }
-                    let text = self
-                        .finish_emissions_scan(self.cancel.load(Ordering::Relaxed))
-                        .unwrap_or(text);
+                    let clear = self.clear_after_scan.take() == Some(id);
+                    let interrupted = self.cancel.load(Ordering::Relaxed);
+                    let text = self.finish_emissions_scan(interrupted).unwrap_or(text);
                     self.busy = false;
                     self.clearing = false;
                     self.log(text.clone());
                     self.status = text;
+                    if clear && !interrupted && self.connected {
+                        self.clear_after_saved_report();
+                    }
                 }
                 _ => {}
             }
@@ -1757,29 +1776,25 @@ impl Workbench {
         self.replay_index = index;
         self.replay_at = at;
     }
-    fn save_baseline(&mut self) {
-        if self.results.rows.is_empty() {
-            self.status = "Read vehicle data or codes before saving a baseline.".into();
-            return;
+    fn save_report(&mut self) -> Option<PathBuf> {
+        if !self.can_export_report() {
+            self.status = "Read vehicle data or codes before saving a report.".into();
+            return None;
         }
-        if !self.vehicle.has_identity() {
-            self.status = "Read the VIN or apply a plate or fleet ID from the garage before saving a baseline.".into();
-            return;
+        if let Err(error) = self.save_edited_scan_notes() {
+            self.page = Page::ScanReview;
+            self.status = format!("Could not save scan notes. {error}");
+            return None;
         }
-        let baseline = self.snapshot();
-        let path = self
-            .root
-            .join("baselines")
-            .join(format!("baseline-{}.json", self.now()));
-        match save_json(&path, &baseline) {
-            Ok(()) => {
-                self.baseline = Some(baseline);
-                self.last_export = Some(path);
-                self.status =
-                    "Before baseline saved. Run the same reads again after the repair.".into();
-            }
-            Err(e) => self.status = e,
-        }
+        let snapshot = self.snapshot();
+        let source = self.latest_scan.as_ref().map(|(path, _)| path.as_path());
+        let result = self.save_scan_report(&snapshot, source).and_then(|path| {
+            save_json(&path.with_extension("json"), &snapshot).map_err(std::io::Error::other)?;
+            Ok(path)
+        });
+        let path = self.report_saved(result)?;
+        self.baseline = Some(snapshot);
+        Some(path)
     }
     fn export_report(&mut self) -> Option<PathBuf> {
         if self.busy {
@@ -2051,7 +2066,9 @@ impl Workbench {
         self.disconnect();
         self.save_recording();
         self.scan_history.retry_saves();
-        if !self.save_scan_notes_for_update() {
+        if let Err(error) = self.save_edited_scan_notes() {
+            self.page = Page::ScanReview;
+            self.status = format!("Update waiting. {error}");
             return;
         }
         if self.unsaved.is_some() {

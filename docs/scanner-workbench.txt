@@ -205,12 +205,16 @@ On a legacy connection, the scanner also reads
 the ECU's confirmed-code count. A fresh zero count can confirm an empty
 stored-code list when that ECU sends no list.
 
-Trouble Codes lists each ECU that acknowledges a clear request.
-Affected readings from before the request stay marked as historical until you
-reread them. In the clear dialog, Save before-clear scan captures and saves
-codes, readiness, VIN and freeze frame before you decide whether to clear.
-Open Clear emissions codes again and confirm when you're ready. After a
-clear request, Save follow-up scan saves fresh results and opens Scan history.
+In Trouble Codes, Save report saves a printable HTML report and its JSON data
+file in the reports folder. Load a saved report under Saved work > Reports
+to compare it with later readings.
+Clear emissions codes captures fresh codes, readiness, VIN and freeze frame,
+saves a before-clear scan and report, then clears emissions codes automatically.
+The report also includes readings already captured in this session. If saving
+fails, Clear stops and shows the error. Stop cancels the operation.
+Trouble Codes lists each ECU that acknowledges the clear request.
+Affected readings stay marked as historical until you reread them.
+After a clear request, Save follow-up scan saves fresh results and opens Scan history.
 If the VIN or plate matches the before-clear capture from this session, the
 comparison opens with the two scans selected. Recheck codes and readiness
 is available for a quick read.

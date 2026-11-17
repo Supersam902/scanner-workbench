@@ -478,30 +478,24 @@ fn show_issues(ui: &mut Ui, snapshot: &Snapshot, request: &'static str) -> bool 
 }
 
 impl Workbench {
-    #[cfg(windows)]
-    pub(super) fn save_scan_notes_for_update(&mut self) -> bool {
+    pub(super) fn save_edited_scan_notes(&mut self) -> Result<(), String> {
         let Some(review) = self
             .scan_review
             .as_mut()
             .filter(|review| review.has_unsaved_notes())
         else {
-            return true;
+            return Ok(());
         };
         if !review.save_notes() {
-            self.page = Page::ScanReview;
-            self.status = format!(
-                "Update waiting. {}",
-                review
-                    .notes_error
-                    .as_deref()
-                    .unwrap_or("Could not save the scan notes.")
-            );
-            return false;
+            return Err(review
+                .notes_error
+                .clone()
+                .unwrap_or_else(|| "Could not save the scan notes.".into()));
         }
         if let (Some(path), Some(notes)) = (&review.path, &review.saved_notes) {
             self.scan_history.record_work_order(path, &notes.work_order);
         }
-        true
+        Ok(())
     }
 
     pub(super) fn scan_review(&mut self, ui: &mut Ui) {
@@ -570,11 +564,10 @@ mod tests {
         let mut app = Workbench::new(folder.path().join("data"));
         app.scan_review = Some(review);
         let lock = super::super::model::lock_file(&path.with_extension("notes.lock")).unwrap();
-        assert!(!app.save_scan_notes_for_update());
+        assert!(app.save_edited_scan_notes().is_err());
         assert!(app.scan_review.as_ref().unwrap().has_unsaved_notes());
-        assert_eq!(app.page, Page::ScanReview);
         drop(lock);
-        assert!(app.save_scan_notes_for_update());
+        assert!(app.save_edited_scan_notes().is_ok());
         assert!(!app.scan_review.as_ref().unwrap().has_unsaved_notes());
         assert_eq!(scan_notes::load(&path).unwrap().work_order, "WO-UPDATE");
         assert_eq!(std::fs::read(path).unwrap(), evidence);
