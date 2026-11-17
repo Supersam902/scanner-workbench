@@ -2086,6 +2086,7 @@ impl Workbench {
             Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Err(err) => {
                 tracing::warn!(%err, "Software update restart failed");
+                self.cancel_operation();
                 self.voltage = None;
                 (self.tx, self.rx) = worker::spawn(
                     std::env::current_exe().ok(),

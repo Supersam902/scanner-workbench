@@ -3519,6 +3519,33 @@ fn update_action_stops_reads_and_saves_the_partial_scan_and_recording() {
 
 #[cfg(windows)]
 #[test]
+fn failed_update_apply_reopens_the_scanner_with_an_idle_worker() {
+    let folder = tempfile::tempdir().unwrap();
+    let (tx, _) = worker::CommandSender::test_channel();
+    let (_, rx) = mpsc::channel();
+    let mut app = Workbench::with_worker(folder.path().join("data"), |_, _| (tx, rx));
+    app.updates = Some(updates::Updates::test_ready(&folder.path().join("install")));
+    // Keep the replacement worker limited to an unregistered fixture driver.
+    app.driver_override = Some(DriverInfo {
+        name: "Missing test driver".into(),
+        path: folder.path().join("unregistered-test-driver.dll"),
+    });
+    app.restarting_for_update = app.updates.as_mut().and_then(updates::Updates::take_ready);
+    app.busy = true;
+    let cancelled = app.cancel.clone();
+    app.apply_update_after_shutdown(&render_context());
+    assert!(cancelled.load(Ordering::Relaxed));
+    assert!(!app.busy && !app.connecting && !app.cancel.load(Ordering::Relaxed));
+    assert!(app.restarting_for_update.is_none());
+    assert_eq!(app.page, Page::Updates);
+    assert!(matches!(
+        app.updates.as_ref().unwrap().state(),
+        updates::State::Failed(_)
+    ));
+}
+
+#[cfg(windows)]
+#[test]
 fn update_save_failure_preserves_the_recording_for_recovery_and_retry() {
     let folder = tempfile::tempdir().unwrap();
     let (tx, commands) = worker::CommandSender::test_channel();
