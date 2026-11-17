@@ -49,11 +49,17 @@ Windows 32-bit build, November 13, 2026, revision 26
    Print comparison opens a printable copy.
 
 Software updates
-If you installed Workbench from Setup, open Connection > Updates to check
-the running version and download progress. At startup, a ready update opens a
-message with a five-second countdown and then restarts Workbench automatically.
+Open the permanent Updates tab in the main navigation to check the running
+version, download progress and patch notes for every published Workbench version.
+Search versions or changes to find an earlier release. Bundled and cached notes
+stay readable offline. Refresh patch notes checks GitHub for newer notes.
+If you installed Workbench from Setup, a ready update opens a message after
+the splash finishes and Overview appears. Its five-second countdown starts on
+Overview. The process is automatic. Workbench installs the update and restarts
+on its own, so you do not need to close or reopen it manually.
 Choose Later to continue, or Update now to restart immediately.
-The orange Update ready button opens the update page. If diagnostics are
+The Updates tab stays visible when the app is current and turns orange when
+an update is ready. If diagnostics are
 running, choose Stop diagnostics and restart to update. Workbench stops reads,
 saves captured scans, recordings and edited scan notes, releases the adapter,
 then updates and restarts. If a save fails, the app opens the affected saved

@@ -15,6 +15,7 @@ mod live_reads;
 pub mod model;
 mod readiness;
 mod recordings;
+mod release_notes;
 mod replay_graphs;
 mod report_sections;
 mod scan_comparison;
@@ -73,7 +74,7 @@ pub enum Page {
     Updates,
 }
 impl Page {
-    const NAVIGATION: [Self; 7] = [
+    const NAVIGATION: [Self; 8] = [
         Self::Home,
         Self::Codes,
         Self::Live,
@@ -81,6 +82,7 @@ impl Page {
         Self::VehicleInfo,
         Self::Recordings,
         Self::Connection,
+        Self::Updates,
     ];
 
     #[cfg(test)]
@@ -108,7 +110,7 @@ impl Page {
             Self::FreezeFrame | Self::MonitorTests => Self::Emissions,
             Self::Garage | Self::Systems => Self::VehicleInfo,
             Self::Reports | Self::ScanHistory | Self::ScanReview => Self::Recordings,
-            Self::Help | Self::Updates => Self::Connection,
+            Self::Help => Self::Connection,
             page => page,
         }
     }
@@ -121,7 +123,8 @@ impl Page {
             Self::Emissions | Self::FreezeFrame | Self::MonitorTests => "Emissions",
             Self::VehicleInfo | Self::Garage | Self::Systems => "Vehicle",
             Self::Recordings | Self::Reports | Self::ScanHistory | Self::ScanReview => "Saved work",
-            Self::Connection | Self::Help | Self::Updates => "Connection",
+            Self::Connection | Self::Help => "Connection",
+            Self::Updates => "Updates",
         }
     }
 
@@ -145,7 +148,6 @@ impl Page {
             Self::Connection => &[
                 (Self::Connection, "Adapter"),
                 (Self::Help, "Manual requests"),
-                (Self::Updates, "Updates"),
             ],
             _ => &[],
         }
@@ -194,6 +196,7 @@ pub struct Workbench {
     #[cfg(windows)]
     startup_update: updates::StartupUpdate,
     splash: StartupSplash,
+    release_notes: release_notes::History,
     driver: Option<String>,
     driver_override: Option<DriverInfo>,
     driver_save_error: Option<String>,
@@ -383,6 +386,7 @@ impl Workbench {
         let db = crate::dtc_database::find_database_path()
             .map(|p| crate::dtc_database::DtcDatabase::load(&p))
             .unwrap_or_default();
+        let release_notes = release_notes::History::new(&root);
         let mut app = Self {
             tx,
             rx,
@@ -395,6 +399,7 @@ impl Workbench {
             #[cfg(windows)]
             startup_update: updates::StartupUpdate::default(),
             splash: StartupSplash::Hidden,
+            release_notes,
             driver: None,
             driver_override,
             driver_save_error: None,
@@ -1316,6 +1321,7 @@ impl Workbench {
         self.vin_conflict = conflict;
     }
     fn tick(&mut self) {
+        self.release_notes.tick();
         #[cfg(windows)]
         if let Some(updates) = &mut self.updates {
             updates.tick();
@@ -2142,7 +2148,14 @@ impl eframe::App for Workbench {
         #[cfg(windows)]
         if self.restarting_for_update.is_some() {
             egui::CentralPanel::default().show(ctx, |ui| {
-                ui.centered_and_justified(|ui| ui.heading("Restarting to update"));
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.heading("Restarting to update");
+                        ui.label(
+                            "This process is automatic. Scanner Workbench will restart on its own.",
+                        );
+                    });
+                });
             });
             if self.tx.is_stopped() {
                 self.apply_update_after_shutdown(ctx);
@@ -2159,16 +2172,7 @@ impl eframe::App for Workbench {
             self.startup_update.dismiss();
             self.prepare_to_close(ctx);
         }
-        #[cfg(windows)]
-        if self.show_startup_update(ctx, Instant::now()) {
-            return;
-        }
-        if self.splash.visible(Instant::now()) {
-            appearance::splash(ctx);
-            ctx.request_repaint_after(Duration::from_millis(40));
-            return;
-        }
-        self.draw(ctx);
+        self.draw_app(ctx, Instant::now());
         ctx.request_repaint_after(Duration::from_millis(
             if self.connected || self.replay_playing {
                 100

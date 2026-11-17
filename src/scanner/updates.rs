@@ -40,7 +40,7 @@ impl StartupUpdate {
     }
 }
 
-pub const REPOSITORY: Option<&str> = option_env!("SCANNER_WORKBENCH_UPDATE_REPOSITORY");
+pub const REPOSITORY: Option<&str> = super::release_notes::REPOSITORY;
 
 pub fn initialize() {
     velopack::VelopackApp::build()
@@ -210,6 +210,14 @@ impl Updates {
     pub(super) fn new() -> Self {
         Self {
             state: State::Idle,
+            events: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_current() -> Self {
+        Self {
+            state: State::Current,
             events: None,
         }
     }

@@ -166,6 +166,17 @@ pub(super) fn open_local(path: &std::path::Path) {
 }
 
 impl Workbench {
+    pub(super) fn draw_app(&mut self, ctx: &egui::Context, now: Instant) {
+        if self.splash.visible(now) {
+            appearance::splash(ctx);
+            ctx.request_repaint_after(Duration::from_millis(40));
+            return;
+        }
+        self.draw(ctx);
+        #[cfg(windows)]
+        self.show_startup_update(ctx, now);
+    }
+
     pub(super) fn draw(&mut self, ctx: &egui::Context) {
         if self.page != Page::ScanReview
             && self
@@ -229,28 +240,27 @@ impl Workbench {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     for page in Page::NAVIGATION {
-                        self.nav_button(ui, page);
-                    }
-                    if self.page != Page::ScanReview
-                        && self
-                            .scan_review
-                            .as_ref()
-                            .is_some_and(|review| review.has_unsaved_notes())
-                        && ui.link("Unsaved scan notes").clicked()
-                    {
-                        self.page = Page::ScanReview;
-                    }
-                    #[cfg(windows)]
-                    if self.update_ready()
-                        && ui
-                            .push_id("update_ready_navigation", |ui| {
-                                action(ui, "Update ready", true)
-                            })
-                            .inner
-                    {
-                        self.page = Page::Updates;
+                        ui.push_id(page, |ui| self.nav_button(ui, page));
                     }
                 });
+                if self.page != Page::ScanReview
+                    && self
+                        .scan_review
+                        .as_ref()
+                        .is_some_and(|review| review.has_unsaved_notes())
+                {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .push_id("unsaved_scan_notes_navigation", |ui| {
+                                ui.link("Unsaved scan notes")
+                            })
+                            .inner
+                            .clicked()
+                        {
+                            self.page = Page::ScanReview;
+                        }
+                    });
+                }
             });
         egui::CentralPanel::default()
             .frame(
@@ -481,6 +491,21 @@ impl Workbench {
     }
 
     fn nav_button(&mut self, ui: &mut egui::Ui, page: Page) {
+        #[cfg(windows)]
+        if page == Page::Updates && self.update_ready() {
+            let button = egui::Button::new(appearance::label("Updates", 15.0).color(CHROME))
+                .fill(ACCENT)
+                .stroke(Stroke::NONE)
+                .min_size(Vec2::new(82.0, 32.0));
+            if ui
+                .add(button)
+                .on_hover_text("An update is ready. Open Updates for installation and patch notes.")
+                .clicked()
+            {
+                self.page = page;
+            }
+            return;
+        }
         let selected = self.page.section() == page;
         let label =
             appearance::label(page.title(), 15.0).color(if selected { ACCENT } else { INK });
@@ -1008,7 +1033,10 @@ impl Workbench {
 
     #[cfg(windows)]
     pub(super) fn show_startup_update(&mut self, ctx: &egui::Context, now: Instant) -> bool {
-        if self.update_restart_blocker().is_some() {
+        if !matches!(self.splash, StartupSplash::Hidden) {
+            return false;
+        }
+        if self.page != Page::Home || self.update_restart_blocker().is_some() {
             self.startup_update.dismiss();
             return false;
         }
@@ -1019,7 +1047,6 @@ impl Workbench {
             Some(updates::State::Ready(update)) => update.version().to_owned(),
             _ => return false,
         };
-        appearance::splash(ctx);
         let response = egui::Modal::new(egui::Id::new("startup_update"))
             .frame(
                 egui::Frame::popup(&ctx.style())
@@ -1032,13 +1059,14 @@ impl Workbench {
                 ui.label(appearance::title("Update ready", 27.0).color(ACCENT));
                 ui.add_space(8.0);
                 ui.label(format!("Scanner Workbench {version} is ready to install."));
-                ui.label("The application will update and restart automatically.");
+                ui.strong("This process is automatic. No action is needed.");
+                ui.label("Scanner Workbench will install the update and restart on its own.");
                 ui.add_space(14.0);
                 ui.label(appearance::label(
                     match seconds {
-                        0 => "Restarting…".into(),
-                        1 => "Restarting in 1 second…".into(),
-                        _ => format!("Restarting in {seconds} seconds…"),
+                        0 => "Updating and restarting…".into(),
+                        1 => "Updating in 1 second…".into(),
+                        _ => format!("Updating in {seconds} seconds…"),
                     },
                     21.0,
                 ));
@@ -1062,6 +1090,8 @@ impl Workbench {
     }
 
     fn update_controls(&mut self, ui: &mut egui::Ui) {
+        #[cfg(windows)]
+        self.release_notes.load_latest();
         card(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(appearance::title("Software updates", 23.0));
@@ -1077,6 +1107,77 @@ impl Workbench {
                 ui,
                 "Automatic updates are available in the Windows installer.",
             );
+        });
+        ui.add_space(12.0);
+        self.release_history(ui);
+    }
+
+    fn release_history(&mut self, ui: &mut egui::Ui) {
+        card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(appearance::title("Patch notes", 23.0));
+            caption(
+                ui,
+                "Changes in every published Scanner Workbench version, newest first.",
+            );
+            #[cfg(windows)]
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.release_notes.loading(),
+                        egui::Button::new("Refresh patch notes"),
+                    )
+                    .clicked()
+                {
+                    self.release_notes.refresh();
+                }
+                if self.release_notes.loading() {
+                    ui.spinner();
+                    caption(ui, "Checking for new patch notes…");
+                }
+            });
+            if let Some(error) = &self.release_notes.error {
+                ui.add(egui::Label::new(RichText::new(error).small().color(AMBER)).wrap());
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut self.release_notes.query)
+                    .hint_text("Search versions or changes")
+                    .desired_width(f32::INFINITY),
+            );
+            let query = self.release_notes.query.trim().to_lowercase();
+            let mut found = false;
+            for (index, release) in self.release_notes.entries().iter().enumerate() {
+                if !query.is_empty()
+                    && !format!("{} {}", release.version, release.notes)
+                        .to_lowercase()
+                        .contains(&query)
+                {
+                    continue;
+                }
+                found = true;
+                let current = release.version == VERSION;
+                let heading = format!(
+                    "Version {}{}",
+                    release.version,
+                    if current { " · Installed" } else { "" }
+                );
+                egui::CollapsingHeader::new(RichText::new(heading).strong())
+                    .id_salt(("release_notes", &release.version))
+                    .default_open(index == 0 || current)
+                    .show(ui, |ui| {
+                        if let Some(date) = release.date_label() {
+                            caption(ui, &date);
+                        }
+                        for paragraph in release.notes.split("\n\n") {
+                            ui.add(egui::Label::new(paragraph.trim().replace("**", "")).wrap());
+                        }
+                        ui.hyperlink_to("View this release on GitHub", release.url());
+                    });
+            }
+            if !found {
+                caption(ui, "No versions match your search.");
+            }
+            ui.hyperlink_to("All releases on GitHub", release_notes::releases_url());
         });
     }
 

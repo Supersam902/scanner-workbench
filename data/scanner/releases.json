@@ -1,0 +1,92 @@
+[
+  {
+    "version": "0.1.22",
+    "published_at": "",
+    "notes": "Scanner Workbench 0.1.22\n\nThe automatic startup update message now waits until the splash screen finishes and Overview is visible. The five-second countdown starts there. The message explains that installation is automatic and Scanner Workbench restarts on its own. Choose Later to continue without updating during that session.\n\nUpdates is now a permanent main navigation tab. It remains available when the app is current and turns orange when a verified update is ready. The page includes searchable patch notes for every published Workbench version, sorted newest first. Existing notes are bundled for offline reading, and opening Updates refreshes the history from GitHub in the background.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.21",
+    "published_at": "2026-11-17T19:40:20Z",
+    "notes": "Scanner Workbench 0.1.21\n\nSave report creates a printable HTML report and a JSON data file for later comparison. Reports can be saved without a VIN, and older saved baselines remain available under Load a saved report.\n\nClear emissions codes now captures fresh codes, readiness, VIN and freeze frame, saves a before-clear scan and report, then sends the clear request in one click. The report preserves other readings already captured in the session. If a save fails, the clear stops and shows the error. Stop or disconnect cancels a pending clear.\n\nRemoved the saved-evidence acknowledgement and extra clear confirmation. Follow-up scans and before/after comparisons remain available.\n\nWindows x86 build for compatible 32-bit J2534 04.04 drivers and ELM-compatible adapters. Driver and vehicle protocol support vary."
+  },
+  {
+    "version": "0.1.20",
+    "published_at": "2026-11-17T19:04:54Z",
+    "notes": "At startup, a downloaded and verified update opens a message with a five-second countdown, then installs and restarts Scanner Workbench automatically. Choose Later to continue or Update now to restart immediately.\n\nUpdate ready is now a prominent orange button. During diagnostics, Stop diagnostics and restart to update stops the reads, saves captured scans, recordings and edited scan notes, and releases the adapter before restarting. If saving fails, the app keeps the work available for recovery and retry. Verified staged packages are remembered for the next launch.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.19",
+    "published_at": "2026-11-17T15:35:59Z",
+    "notes": "Trouble codes opens automatically after Connect verifies the vehicle. Workbench reads stored, pending, and permanent trouble codes along with readiness since clear and readiness for this drive cycle in one read-only sweep. Choose View readiness on the Trouble codes page to see the monitor results.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.18",
+    "published_at": "2026-11-14T22:12:22Z",
+    "notes": "Export a saved emissions scan as a single .obdscan file with its vehicle details, diagnostic evidence, work order, and technician notes. Open Saved work > Scan history, select the scan, and use Export scan. On another PC, use Import scan in Scan history to reopen and print it. Import also accepts earlier saved scan JSON files alongside their matching notes file when present.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.17",
+    "published_at": "2026-11-14T21:09:30Z",
+    "notes": "Open Notes in Scan review to save a work-order reference and technician findings with a saved scan. The work order is searchable in Scan history. New printouts include the saved work order and notes along with the original diagnostic results.\n\nThe notes file is saved beside its scan file. Copy both files when transferring a scan and its notes to another computer.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.16",
+    "published_at": "2026-11-14T20:29:30Z",
+    "notes": "Open Connection > Adapter and choose Copy connection report to share the latest Connect result, adapter settings, available DLC voltage and protocol attempts. The report includes the results from Check vehicle reply when available, along with adapter and driver error text.\n\nELM connection attempts now distinguish setup rejection, protocol identification, transport failure and incomplete ECU replies. A failed attempt includes the next check when there is enough evidence.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.15",
+    "published_at": "2026-11-14T19:48:07Z",
+    "notes": "Choose Review graphs on a saved recording to inspect readings before and after a symptom. The charts share the replay cursor, show marked events and preserve gaps for failed reads and pauses. Click a chart to move the cursor, or click near a marker to jump to its exact time. The displayed current readings follow the cursor.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.14",
+    "published_at": "2026-11-14T19:08:04Z",
+    "notes": "Save named PID selections in Live Data > Presets. Choose a saved preset to reuse the same set of readings after restarting or switching vehicles. Workbench applies the connected vehicle's PID support filter when it reads the list.\n\nChoose PIDs under Data items, then use Presets > Save current selection. You can open a saved preset while connected or offline. If live polling is running, the next cycle uses the new selection.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.13",
+    "published_at": "2026-11-14T18:18:14Z",
+    "notes": "Scanner Workbench supports a wide range of adapters for generic OBD-II diagnostics on Windows.\n\n- **ELM327-compatible USB and Bluetooth serial** use a Windows COM port. Plug in the USB adapter or pair the Bluetooth adapter first.\n- **ELM327-compatible Wi-Fi/TCP** uses the host and port supplied by the adapter.\n- **J2534 pass-through** uses the vendor's 32-bit Windows J2534 04.04 driver.\n\nOpen **Connection → Adapter** to select your connection type. The Windows app uses these adapters for DLC voltage, VIN, per-ECU reads, live data, and emissions scans. The adapter must support the vehicle's OBD-II protocol. ELM327-compatible adapters need automatic protocol detection and ECU response headers. [Check adapter compatibility](https://github.com/Supersam902/scanner-workbench#adapter-compatibility).\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.11",
+    "published_at": "2026-11-14T17:15:52Z",
+    "notes": "Scanner Workbench 0.1.11\n\nGeneric OBD-II diagnostics include codes, readiness, freeze frames, VIN, live data and scan reports. This release removes the experimental vehicle-specific workspaces and component-test commands.\n\nAutomatic Connect checks installed J2534 04.04 drivers. Select an adapter under Connection to save your preference for Connect and DLC voltage. The classic dashboard supports ELM-compatible serial and TCP adapters on the desktop, and Web Serial in the browser.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.8",
+    "published_at": "2026-11-14T16:19:21Z",
+    "notes": "Scanner Workbench 0.1.8\n\nSave a read-only scan from the emissions clear dialog, then confirm the clear separately. Save follow-up scan adds a second history entry and opens the comparison when both scans match the same vehicle.\n\nThis is an unsigned Windows x86 release."
+  },
+  {
+    "version": "0.1.7",
+    "published_at": "2026-11-14T15:43:47Z",
+    "notes": "Scanner Workbench 0.1.7\n\nConnection shows the last vehicle reply check, including valid support bitmaps, truncated replies, rejections, and missing ECU replies. Copy reply check includes the protocol and raw evidence. Use Details beside the connection status after a failed connection or a lost vehicle reply.\n\nThis is an unsigned Windows x86 release."
+  },
+  {
+    "version": "0.1.6",
+    "published_at": "2026-11-14T15:19:53Z",
+    "notes": "Scanner Workbench 0.1.6\n\nClick Mark event while recording live data or diagnostic reads. Add an optional note to identify the symptom. In replay, jump directly to a marker and inspect the readings. Full CSV export includes the markers and notes.\n\nThis is an unsigned Windows x86 release."
+  },
+  {
+    "version": "0.1.5",
+    "published_at": "2026-11-14T14:48:38Z",
+    "notes": "Scanner Workbench 0.1.5\n\nReview scans from Overview or Saved work > Scan history. Inspect saved trouble codes by ECU, compare readiness since clear with the captured drive-cycle results, and open a matching freeze frame from its code. The review uses the captured scan and stays available during vehicle communication.\n\nThis is an unsigned Windows x86 release."
+  },
+  {
+    "version": "0.1.4",
+    "published_at": "2026-11-13T20:14:43Z",
+    "notes": "Scanner Workbench 0.1.4\n\nConnection > Updates shows the running version, download progress, retry controls, and why a restart might be waiting. A ready update appears in the navigation bar.\n\nThe updater uses the public GitHub release feed and downloads the package from its version tag. This is an unsigned Windows x86 release."
+  },
+  {
+    "version": "0.1.3",
+    "published_at": "2026-11-13T19:40:33Z",
+    "notes": "Scanner Workbench 0.1.3\n\nChoose an installed 32-bit J2534 04.04 driver from Connection > Adapter to use another pass-through cable. The default Connect behavior still discovers Mongoose adapters automatically. The selected adapter also supplies the live DLC voltage when it supports the reading.\n\nThis is an unsigned Windows x86 release. Actual adapter and vehicle coverage depends on the installed driver and its supported protocols."
+  },
+  {
+    "version": "0.1.1",
+    "published_at": "2026-11-13T19:05:25Z",
+    "notes": "Scanner Workbench for Windows x86 and the Mongoose MFC3 J2534 04.04 driver.\n\n- Connect discovers the active Mongoose and verifies a generic OBD-II reply. The header shows live DLC voltage and a copyable VIN.\n- Read stored, pending, and permanent codes, capture freeze frames, check readiness, and print an emissions scan report. The history can compare scans from the same vehicle.\n- Live data supports per-ECU readings, charts, and recordings. Practice mode lets you try the workflow with simulated data.\n- The Windows installer supports background update checks. Apply a downloaded update from Connection after disconnecting and saving your work.\n\nThe driver is installed separately. This Windows build is unsigned. Diagnostic support depends on the vehicle and its responses."
+  }
+]

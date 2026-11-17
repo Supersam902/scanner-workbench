@@ -3544,9 +3544,7 @@ fn startup_update_can_be_deferred_and_restarts_after_five_seconds() {
                 ..Default::default()
             },
             |ctx| {
-                if !app.show_startup_update(ctx, now) {
-                    app.draw(ctx);
-                }
+                app.draw_app(ctx, now);
             },
         )
     };
@@ -3563,7 +3561,9 @@ fn startup_update_can_be_deferred_and_restarts_after_five_seconds() {
     let output = draw(&mut app, start, vec![]);
     for label in [
         "Update ready",
-        "Restarting in 5 seconds…",
+        "Updating in 5 seconds…",
+        "This process is automatic. No action is needed.",
+        "Scanner Workbench will install the update and restart on its own.",
         "Update now",
         "Later",
     ] {
@@ -3584,9 +3584,9 @@ fn startup_update_can_be_deferred_and_restarts_after_five_seconds() {
     );
     draw(&mut app, start, vec![click(false)]);
     let deferred = draw(&mut app, start + Duration::from_secs(8), vec![]);
-    assert!(text(&deferred, "Restarting…").is_none());
+    assert!(text(&deferred, "Updating and restarting…").is_none());
     assert!(app.update_ready() && app.restarting_for_update.is_none());
-    let badge = text(&deferred, "Update ready").unwrap();
+    let badge = text(&deferred, "Updates").unwrap();
     assert!(deferred.shapes.iter().any(|shape| {
         matches!(&shape.shape, egui::Shape::Rect(rect)
             if rect.fill == appearance::ACCENT && rect.rect.contains_rect(badge))
@@ -3610,6 +3610,124 @@ fn startup_update_can_be_deferred_and_restarts_after_five_seconds() {
         Ok(Command::Disconnect { .. })
     ));
     assert!(matches!(commands.try_recv(), Ok(Command::Shutdown)));
+}
+
+#[cfg(windows)]
+#[test]
+fn startup_update_waits_for_the_splash_and_counts_down_over_overview() {
+    let folder = tempfile::tempdir().unwrap();
+    let (tx, commands) = worker::CommandSender::test_channel();
+    let (_, rx) = mpsc::channel();
+    let mut app = Workbench::with_worker(folder.path().join("data"), |_, _| (tx, rx));
+    app.updates = Some(updates::Updates::test_ready(&folder.path().join("install")));
+    app.show_startup_splash();
+    let ctx = render_context();
+    let draw = |app: &mut Workbench, now| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| app.draw_app(ctx, now),
+        )
+    };
+    let has = |output: &egui::FullOutput, label: &str| {
+        output.shapes.iter().any(|shape| {
+        matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == label)
+    })
+    };
+    let start = Instant::now();
+    for offset in [0, 500] {
+        let output = draw(&mut app, start + Duration::from_millis(offset));
+        assert!(!has(&output, "Update now"));
+        assert!(!has(&output, "Connect your adapter"));
+        assert!(app.restarting_for_update.is_none());
+    }
+    let home = start + Duration::from_millis(900);
+    draw(&mut app, home);
+    let output = draw(&mut app, home);
+    for label in [
+        "Overview",
+        "Connect your adapter",
+        "Update now",
+        "Updating in 5 seconds…",
+    ] {
+        assert!(has(&output, label), "Missing {label}");
+    }
+    draw(&mut app, start + Duration::from_secs(5));
+    assert!(app.restarting_for_update.is_none());
+    assert!(commands.try_recv().is_err());
+    draw(&mut app, home + Duration::from_secs(5));
+    assert!(app.restarting_for_update.is_some());
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::Disconnect { .. })
+    ));
+    assert!(matches!(commands.try_recv(), Ok(Command::Shutdown)));
+}
+
+#[cfg(windows)]
+#[test]
+fn updates_navigation_and_patch_notes_remain_available_when_current() {
+    let folder = tempfile::tempdir().unwrap();
+    let (tx, _) = worker::CommandSender::test_channel();
+    let (_, rx) = mpsc::channel();
+    let mut app = Workbench::with_worker(folder.path().join("data"), |_, _| (tx, rx));
+    app.updates = Some(updates::Updates::test_current());
+    let ctx = render_context();
+    let draw = |app: &mut Workbench, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    };
+    let text = |output: &egui::FullOutput, label: &str| {
+        output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == label => {
+                Some(text.visual_bounding_rect())
+            }
+            _ => None,
+        })
+    };
+    let output = draw(&mut app, vec![]);
+    let pointer = text(&output, "Updates")
+        .expect("the tab remains visible without an update")
+        .center();
+    let click = |pressed| egui::Event::PointerButton {
+        pos: pointer,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    draw(
+        &mut app,
+        vec![egui::Event::PointerMoved(pointer), click(true)],
+    );
+    draw(&mut app, vec![click(false)]);
+    let output = draw(&mut app, vec![]);
+    assert_eq!(app.page, Page::Updates);
+    for label in [
+        "Software updates",
+        "You’re up to date.",
+        "Check for updates",
+        "Patch notes",
+    ] {
+        assert!(text(&output, label).is_some(), "Missing {label}");
+    }
+    app.release_notes.query = "copyable VIN".into();
+    let output = draw(&mut app, vec![]);
+    assert!(text(&output, "Version 0.1.1").is_some());
+    assert!(text(&output, "Version 0.1.21").is_none());
 }
 
 #[cfg(windows)]
