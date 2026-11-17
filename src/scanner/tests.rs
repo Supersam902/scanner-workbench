@@ -3365,6 +3365,7 @@ fn live_reads_use_checked_ranges_and_keep_unchecked_selections_available() {
     use crate::diagnostics::SupportScan;
 
     let mut app = Workbench::new(temp("live-pids"));
+    app.auto_select_live = false;
     app.selected = ["OBD:0105", "OBD:010C", "OBD:0121", "OBD:0142"]
         .into_iter()
         .map(str::to_owned)
@@ -4009,6 +4010,237 @@ fn live_data_expands_with_the_window_and_scrolls_with_the_page() {
 }
 
 #[test]
+fn supported_live_selection_and_graph_buttons_have_no_six_signal_limit() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut app = Workbench::new(folder.path().to_owned());
+    app.start_demo();
+    pump(&mut app);
+    let reported: BTreeSet<_> = app.generic.iter().filter(|query| matches!(query.bytes.as_slice(), [1, pid] if app.pid_support.reported.contains(pid))).map(query_key).collect();
+    assert_eq!(app.selected, reported);
+    assert!(app.selected.len() > 6);
+    app.read_live(app.selected_queries(), false);
+    pump(&mut app);
+    app.page = Page::Live;
+    assert!(app.graph_signals.is_none());
+    let ctx = render_context();
+    let size = egui::vec2(1440.0, 1200.0);
+    let draw = |app: &mut Workbench, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    };
+    draw(&mut app, vec![]);
+    let output = draw(&mut app, vec![]);
+    let (key, name) = app
+        .results
+        .rows
+        .iter()
+        .find(|(_, value)| value.minimum.is_some())
+        .map(|(key, value)| (key.clone(), value.latest.reading.name.clone()))
+        .unwrap();
+    let text = |output: &egui::FullOutput, label: &str| {
+        output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text)
+                if text.galley.job.text == label
+                    && shape.clip_rect.contains_rect(text.visual_bounding_rect()) =>
+            {
+                Some(text.visual_bounding_rect())
+            }
+            _ => None,
+        })
+    };
+    let icon = text(&output, &name).unwrap().left_center() - egui::vec2(22.0, 0.0);
+    let click = |pressed| egui::Event::PointerButton {
+        pos: icon,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    draw(&mut app, vec![egui::Event::PointerMoved(icon), click(true)]);
+    draw(&mut app, vec![click(false)]);
+    assert!(app.graphs);
+    assert_eq!(app.graph_signals.as_ref().unwrap(), &vec![key]);
+    let all: Vec<_> = app
+        .results
+        .rows
+        .iter()
+        .filter(|(_, value)| value.minimum.is_some())
+        .map(|(key, _)| key.clone())
+        .collect();
+    assert!(all.len() > 6);
+    for key in &all {
+        if !app.graph_signals.as_ref().unwrap().contains(key) {
+            app.toggle_graph(key.clone());
+        }
+    }
+    assert_eq!(app.graph_signals.as_ref().unwrap().len(), all.len());
+    app.graphs = false;
+    app.selected.clear();
+    app.auto_select_live = false;
+    let output = draw(&mut app, vec![]);
+    let pointer = text(&output, "Select all").unwrap().center();
+    let click = |pressed| egui::Event::PointerButton {
+        pos: pointer,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    draw(
+        &mut app,
+        vec![egui::Event::PointerMoved(pointer), click(true)],
+    );
+    draw(&mut app, vec![click(false)]);
+    assert_eq!(app.selected, reported);
+    assert!(app.auto_select_live);
+}
+
+#[test]
+fn profile_unit_changes_update_live_values_graph_ranges_and_reports_without_changing_capture_data()
+{
+    let folder = tempfile::tempdir().unwrap();
+    let mut app = Workbench::new(folder.path().to_owned());
+    let profile = profiles::UserProfile {
+        id: "sam".into(),
+        name: "Sam".into(),
+        units: units::Units {
+            speed: units::Speed::Mph,
+            temperature: units::Temperature::Fahrenheit,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    app.save_profile(&profile, None).unwrap();
+    app.page = Page::Live;
+    app.selected = BTreeSet::from(["OBD:010D".into()]);
+    let raw = Reading {
+        request: "010D".into(),
+        name: "Vehicle speed".into(),
+        value: "100".into(),
+        numeric: Some(100.0),
+        unit: "kilometersPerHour".into(),
+        raw: "410D64".into(),
+        ..reading("100", Some(100.0))
+    };
+    app.apply_sample(Sample {
+        at_ms: app.now(),
+        rows: vec![raw.clone()],
+        ..Default::default()
+    });
+    app.toggle_graph(row_key(&raw));
+    let ctx = render_context();
+    let draw = |app: &mut Workbench| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 1000.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    };
+    draw(&mut app);
+    let output = draw(&mut app);
+    for expected in [
+        "62.14",
+        "mph",
+        "62.14 mph",
+        "62.14 to 62.14 mph · last 60 s",
+    ] {
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == expected)), "Missing {expected}");
+    }
+    let report = app.save_report().unwrap();
+    let html = std::fs::read_to_string(&report).unwrap();
+    assert!(html.contains("62.14") && html.contains("mph"));
+    let original: Snapshot = load_json(&report.with_extension("json")).unwrap();
+    assert_eq!(original.rows[0].reading.value, "100");
+    assert_eq!(original.rows[0].reading.unit, "kilometersPerHour");
+    assert_eq!(app.results.rows[&row_key(&raw)].latest.reading.value, "100");
+}
+
+#[test]
+fn first_run_profile_dialog_waits_for_the_splash_and_saves_name_and_units() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut app = Workbench::new(folder.path().to_owned());
+    app.show_startup_splash();
+    app.prompt_for_profile();
+    let start = Instant::now();
+    let ctx = render_context();
+    let draw = |app: &mut Workbench, now, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(680.0, 480.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw_app(ctx, now),
+        )
+    };
+    let text = |output: &egui::FullOutput, label: &str| {
+        output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == label => {
+                Some(text.visual_bounding_rect())
+            }
+            _ => None,
+        })
+    };
+    let output = draw(&mut app, start, vec![]);
+    assert!(text(&output, "Profile name").is_none());
+    let ready = start + Duration::from_secs(1);
+    draw(&mut app, ready, vec![]);
+    let output = draw(&mut app, ready, vec![]);
+    for label in [
+        "Welcome to Scanner Workbench",
+        "Profile name",
+        "Speed",
+        "Airflow",
+        "Temperature",
+        "Pressure",
+        "Distance",
+        "Save profile",
+    ] {
+        assert!(text(&output, label).is_some(), "Missing {label}");
+    }
+    draw(&mut app, ready, vec![egui::Event::Text("Sam".into())]);
+    let click_label = |app: &mut Workbench, label: &str| {
+        let output = draw(app, ready, vec![]);
+        let pointer = text(&output, label).unwrap().center();
+        let click = |pressed| egui::Event::PointerButton {
+            pos: pointer,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        draw(
+            app,
+            ready,
+            vec![egui::Event::PointerMoved(pointer), click(true)],
+        );
+        draw(app, ready, vec![click(false)]);
+    };
+    click_label(&mut app, "mph");
+    click_label(&mut app, "°F");
+    click_label(&mut app, "Save profile");
+    assert!(app.profile_dialog.is_none());
+    let restarted = Workbench::new(folder.path().to_owned());
+    assert_eq!(restarted.settings.profile().unwrap().name, "Sam");
+    assert_eq!(restarted.unit_preferences().speed, units::Speed::Mph);
+    assert_eq!(
+        restarted.unit_preferences().temperature,
+        units::Temperature::Fahrenheit
+    );
+}
+
+#[test]
 fn every_new_page_renders_in_compact_and_large_windows() {
     fn visible(shapes: &[egui::epaint::ClippedShape], screen: egui::Rect, label: &str) -> bool {
         fn contains(shape: &egui::Shape, clip: egui::Rect, label: &str) -> bool {
@@ -4201,6 +4433,16 @@ fn every_new_page_renders_in_compact_and_large_windows() {
         app.playback = Some(replay_graphs::ReplayCapture::new(Arc::new(capture)));
         app.page = Page::Live;
         app.graphs = true;
+        app.graph_signals = Some(
+            app.playback
+                .as_ref()
+                .unwrap()
+                .graphs()
+                .signals
+                .keys()
+                .cloned()
+                .collect(),
+        );
         let output = ctx.run(
             egui::RawInput {
                 screen_rect: Some(screen),
@@ -4212,7 +4454,7 @@ fn every_new_page_renders_in_compact_and_large_windows() {
             "Replay controls",
             "Play",
             "Rewind",
-            "Signals · 1/6",
+            "Signals · 1",
             "60 s",
             "Engine RPM · ECU 7E8",
         ] {

@@ -95,7 +95,12 @@ impl Review {
         }
     }
 
-    pub(super) fn show(&mut self, ui: &mut Ui, describe: impl Fn(&str) -> String) -> (bool, bool) {
+    pub(super) fn show(
+        &mut self,
+        ui: &mut Ui,
+        units: super::units::Units,
+        describe: impl Fn(&str) -> String,
+    ) -> (bool, bool) {
         let mut print = false;
         let mut notes_saved = false;
         let snapshot = self.snapshot.clone();
@@ -186,7 +191,7 @@ impl Review {
                     if self.frame.is_some() && ui.link("Show all frames").clicked() {
                         self.frame = None;
                     }
-                    show_frames(ui, &snapshot, frames, self.frame, describe);
+                    show_frames(ui, &snapshot, frames, self.frame, units, describe);
                 }
                 Section::Notes => self.notes(ui),
             });
@@ -387,6 +392,7 @@ fn show_frames(
     snapshot: &Snapshot,
     frames: Frames<'_>,
     selected: Option<(u32, u8)>,
+    units: super::units::Units,
     describe: impl Fn(&str) -> String,
 ) {
     if frames.by_ecu.is_empty() && frames.discovery.is_empty() {
@@ -440,7 +446,7 @@ fn show_frames(
                                 if unavailable(reading) {
                                     ui.colored_label(AMBER, &reading.status);
                                 } else {
-                                    ui.label(frame_value(reading));
+                                    ui.label(frame_value(&units.reading(reading)));
                                 }
                                 if let Some(state) =
                                     frame_reading_qualification(snapshot, &frame, row)
@@ -499,6 +505,7 @@ impl Workbench {
     }
 
     pub(super) fn scan_review(&mut self, ui: &mut Ui) {
+        let units = self.unit_preferences();
         let Some(review) = self.scan_review.as_mut() else {
             caption(ui, "Choose a scan from Scan history or Overview.");
             return;
@@ -523,8 +530,9 @@ impl Workbench {
         }
         let snapshot = review.snapshot.clone();
         let db = &self.db;
-        let (print, saved) =
-            review.show(ui, |code| Self::describe_code(db, &snapshot.vehicle, code));
+        let (print, saved) = review.show(ui, units, |code| {
+            Self::describe_code(db, &snapshot.vehicle, code)
+        });
         let path = review.path.clone();
         if saved && let (Some(path), Some(notes)) = (&path, &review.saved_notes) {
             self.scan_history.record_work_order(path, &notes.work_order);

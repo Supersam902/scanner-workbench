@@ -3,6 +3,11 @@ Windows 32-bit build, November 13, 2026, revision 26
 
 1. Attach the adapter to the vehicle and connect it to the PC. Turn the ignition on.
 2. Open Scanner Workbench from the desktop shortcut or the executable in this folder.
+   On first use, enter a profile name and choose speed, airflow, temperature,
+   pressure and distance units. Save profile keeps these choices. Use default
+   profile creates a profile with metric units. Manage profiles later under
+   Connection > Profiles. The first profile retains existing favorites and PID
+   presets. Each additional profile keeps its own favorites and presets.
 3. Open Connection > Adapter if you need to change the adapter type.
    J2534 uses an installed 32-bit J2534 04.04 driver. Automatic finds an
    active cable, or you can select a driver. For ELM-compatible serial,
@@ -145,6 +150,10 @@ the VIN it applied to the session.
 The Live Data readings list grows to show its rows instead of using an inner
 scrolling box. Columns resize with the window, giving data-item names more room
 on wider screens. When the readings exceed the screen, scroll the page to reach them.
+All known PIDs reported by the vehicle are selected by default. Select all at
+the top restores the reported selection. Additional support replies add newly
+reported PIDs while automatic selection is active. Choosing items or a preset
+keeps that manual selection until you choose Select all or All supported again.
 Live Data polls in the background while the toolbar stays available. A
 separate diagnostic read stops polling and waits for the current request to
 finish. Live Data uses the support reply from Connect and checks additional ranges
@@ -162,10 +171,18 @@ Turn off Group CAN reads under Data items to use individual requests from
 the start.
 The readings and graphs identify the responding ECU. If one signal is
 unavailable, other signals from the same reply can still update. Live Data
-opens with the table visible. Turn on Graphs and use Signals to choose up to
-six readings by ECU. Choose a time window from 10 to 120 seconds. Hover
+opens with the table visible. Click the chart icon beside a numeric reading to
+add that exact signal and ECU to graphs. The icon also removes a selected graph.
+Graphs appear below the list. Signals, Graph all and Clear graphs manage the
+selection without an artificial graph-count limit. Choose a time window from
+10 to 120 seconds. Hover
 over a point to see its value and age. Gaps show failed reads and pauses.
 Playback controls are also available on Live Data when a recording is open.
+
+The active profile controls display units in readings, graphs, freeze frames
+and new printouts. Changing a profile converts the display without changing
+captured evidence. Recordings, CSV exports and portable scans keep their original
+values and units. Monitor-test values and limits keep their protocol units.
 
 While recording, click Mark event when the symptom occurs. For a labeled
 marker, type an optional note before clicking. In replay, choose a marker

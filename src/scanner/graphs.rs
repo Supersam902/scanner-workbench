@@ -1,8 +1,6 @@
 use super::model::{GraphPoint, RecordingMarker};
 use crate::diagnostics::Reading;
 
-pub(super) const MAX_GRAPHS: usize = 6;
-
 pub(super) fn signal_title(reading: &Reading) -> String {
     match reading.source {
         Some(source) => format!("{} · ECU {source:X}", reading.name),
@@ -51,8 +49,8 @@ pub(super) struct Trace {
 }
 
 impl Trace {
-    pub(super) fn new<'a>(
-        points: impl IntoIterator<Item = &'a GraphPoint>,
+    pub(super) fn new(
+        points: impl IntoIterator<Item = impl std::borrow::Borrow<GraphPoint>>,
         start: u64,
         end: u64,
     ) -> Self {
@@ -60,8 +58,9 @@ impl Trace {
         let mut run = Vec::new();
         let mut low = f64::INFINITY;
         let mut high = f64::NEG_INFINITY;
-        for &point in points
+        for point in points
             .into_iter()
+            .map(|point| *point.borrow())
             .filter(|p| (start..=end).contains(&p.at_ms))
         {
             if let Some(number) = point.value {

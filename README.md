@@ -22,13 +22,15 @@ Check that the adapter supports your vehicle's protocol. Workbench supports ISO 
 ## Scan and save results
 
 - **Overview** runs an emissions scan with stored, pending and permanent codes, readiness since clear and this drive cycle, VIN, and freeze frame.
-- **Live data** shows supported PIDs with graphs and recordings. Its list grows with the captured readings, and columns resize to use the window width. Long lists scroll with the page. Save named PID selections from **Presets** and review readings before and after a marked event in a saved recording. The header displays DLC voltage and a click-to-copy VIN.
+- **Live data** selects all known PIDs reported by the vehicle by default. **Select all** restores that selection at the top of the page. Click the chart icon beside a reading to graph that signal and ECU, or use **Graph all**. Graph selection has no six-signal limit. The list grows with the readings, and columns resize with the window. Save named PID selections from **Presets** and review readings before and after a marked event in a recording.
 - **Trouble codes** offers **Save report** for a printable report and a data file for later comparison. **Clear emissions codes** automatically captures codes, readiness, VIN, and freeze frame, saves the report, then clears emissions codes in one click. Save a follow-up scan to compare results for the same vehicle.
 - **Reports** opens a print-ready scan report. Add a work order and technician notes from **Scan review → Notes**. Use **Export scan** and **Import scan** in Scan history to transfer a saved scan and notes in one file. Recordings also export to CSV.
 
 The installer checks the public GitHub release feed. Once the splash finishes and **Overview** appears, a ready update shows a five-second countdown. Installation is automatic and Workbench restarts on its own. Choose **Later** to continue. **Updates** is always visible in the main navigation and turns orange when an update is ready. It includes searchable patch notes for every published version, with bundled and cached notes available offline. **Stop diagnostics and restart to update** saves captured work and releases the adapter before restarting. Vehicle data stays in `%LOCALAPPDATA%/ScannerWorkbench`.
 
 Use `--demo` for a practice session and `--data-dir PATH` for separate local storage. See the [Workbench guide](docs/scanner-workbench.txt) and [release documentation](docs/scanner-releases.md).
+
+On first use, create a local profile with your name and preferred speed, airflow, temperature, pressure and distance units. **Connection → Profiles** lets you create, edit and switch profiles. Each profile keeps its own favorites and PID presets. Live readings, graph scales, freeze frames and new printouts use the selected display units. Recordings, CSV and portable scan files retain their original values and units. Monitor-test results and limits retain their protocol units.
 
 ## Build from source
 

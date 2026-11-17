@@ -104,6 +104,10 @@ impl Vehicle {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Settings {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, super::profiles::UserProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_profile: Option<String>,
     pub garage: Vec<Vehicle>,
     pub favorites: BTreeSet<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -116,6 +120,45 @@ pub struct Settings {
 }
 
 impl Settings {
+    pub(super) fn profile(&self) -> Option<&super::profiles::UserProfile> {
+        self.active_profile
+            .as_ref()
+            .and_then(|id| self.profiles.get(id))
+    }
+    pub(super) fn favorites(&self) -> &BTreeSet<String> {
+        self.profile()
+            .map_or(&self.favorites, |profile| &profile.favorites)
+    }
+    pub(super) fn live_presets(&self) -> &BTreeMap<String, BTreeSet<String>> {
+        self.profile()
+            .map_or(&self.live_presets, |profile| &profile.live_presets)
+    }
+    pub(super) fn user_favorites_mut(
+        &mut self,
+        id: Option<&str>,
+    ) -> Result<&mut BTreeSet<String>, String> {
+        match id {
+            Some(id) => self
+                .profiles
+                .get_mut(id)
+                .map(|profile| &mut profile.favorites)
+                .ok_or_else(|| "This profile is unavailable. Select a profile again.".into()),
+            None => Ok(&mut self.favorites),
+        }
+    }
+    pub(super) fn user_presets_mut(
+        &mut self,
+        id: Option<&str>,
+    ) -> Result<&mut BTreeMap<String, BTreeSet<String>>, String> {
+        match id {
+            Some(id) => self
+                .profiles
+                .get_mut(id)
+                .map(|profile| &mut profile.live_presets)
+                .ok_or_else(|| "This profile is unavailable. Select a profile again.".into()),
+            None => Ok(&mut self.live_presets),
+        }
+    }
     pub(super) fn load(root: &Path) -> Result<Self, String> {
         match read_json(&root.join("settings.json")) {
             Ok(settings) => Ok(settings),
@@ -298,10 +341,14 @@ pub fn ecu_label(source: Option<u32>) -> String {
 pub(super) fn unit_label(unit: &str) -> &str {
     match unit {
         "celsius" | "C" => "°C",
-        "fahrenheit" => "°F",
+        "fahrenheit" | "F" => "°F",
         "percent" => "%",
         "gramsPerSecond" => "g/s",
         "kilometersPerHour" => "km/h",
+        "milesPerHour" => "mph",
+        "kilometers" => "km",
+        "miles" => "mi",
+        "poundsPerMinute" => "lb/min",
         "kilopascal" => "kPa",
         "volts" => "V",
         "seconds" => "s",

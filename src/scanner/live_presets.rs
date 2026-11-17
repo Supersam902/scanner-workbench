@@ -1,8 +1,14 @@
 use super::appearance::title;
-use super::{Page, Settings, Workbench, query_key};
+use super::{Page, Workbench, query_key};
 use std::collections::BTreeSet;
 
-const BUILT_IN: [&str; 4] = ["Engine", "Fuel trims", "Temperature", "Favorites"];
+const BUILT_IN: [&str; 5] = [
+    "All supported",
+    "Engine",
+    "Fuel trims",
+    "Temperature",
+    "Favorites",
+];
 const MAX_NAME_LENGTH: usize = 48;
 
 enum Action {
@@ -20,7 +26,19 @@ pub(super) struct Dialog {
 }
 
 impl Workbench {
+    pub(super) fn select_all_live(&mut self) {
+        self.auto_select_live = true;
+        self.selected = self.generic.iter().filter(|query| {
+            matches!(query.bytes.as_slice(), [1, pid] if !self.connected || self.pid_support.reported.contains(pid))
+        }).map(query_key).collect();
+    }
+
     pub(super) fn preset(&mut self, name: &str) {
+        if name == "All supported" {
+            self.select_all_live();
+            return;
+        }
+        self.auto_select_live = false;
         let pids: &[u8] = match name {
             "Fuel trims" => &[6, 7, 8, 9, 4, 12, 16],
             "Temperature" => &[5, 15, 70, 92],
@@ -32,7 +50,7 @@ impl Workbench {
             .filter_map(|query| {
                 let key = query_key(query);
                 let included = if name == "Favorites" {
-                    self.settings.favorites.contains(&key)
+                    self.settings.favorites().contains(&key)
                 } else {
                     query.target.is_none() && query.bytes.get(1).is_some_and(|p| pids.contains(p))
                 };
@@ -58,15 +76,17 @@ impl Workbench {
         let name = name.to_owned();
         let selection = self.selected.clone();
         let folded_name = name.to_lowercase();
-        self.settings = Settings::try_edit(&self.root, |settings| {
+        let profile = self.settings.active_profile.clone();
+        self.try_edit_settings(|settings| {
+            let presets = settings.user_presets_mut(profile.as_deref())?;
             let duplicate = BUILT_IN
                 .into_iter()
-                .chain(settings.live_presets.keys().map(String::as_str))
+                .chain(presets.keys().map(String::as_str))
                 .any(|existing| existing.to_lowercase() == folded_name);
             if duplicate {
                 return Err("That preset name is already in use.".into());
             }
-            settings.live_presets.insert(name, selection);
+            presets.insert(name, selection);
             Ok(())
         })?;
         Ok(())
@@ -75,7 +95,7 @@ impl Workbench {
     pub(super) fn load_live_preset(&mut self, name: &str) -> Result<(), String> {
         let saved = self
             .settings
-            .live_presets
+            .live_presets()
             .get(name)
             .ok_or_else(|| format!("Preset “{name}” is unavailable."))?;
         let selection: BTreeSet<_> = self
@@ -93,6 +113,7 @@ impl Workbench {
             self.selected = selection;
             self.graph_signals = None;
         }
+        self.auto_select_live = false;
         Ok(())
     }
 
@@ -101,18 +122,16 @@ impl Workbench {
         name: &str,
         original: &BTreeSet<String>,
     ) -> Result<(), String> {
-        self.settings = Settings::try_edit(&self.root, |settings| {
-            if settings
-                .live_presets
-                .get(name)
-                .is_some_and(|current| current != original)
-            {
+        let profile = self.settings.active_profile.clone();
+        self.try_edit_settings(|settings| {
+            let presets = settings.user_presets_mut(profile.as_deref())?;
+            if presets.get(name).is_some_and(|current| current != original) {
                 return Err(
                     "This preset changed in another window. Reopen the scanner to refresh it."
                         .into(),
                 );
             }
-            settings.live_presets.remove(name);
+            presets.remove(name);
             Ok(())
         })?;
         Ok(())
@@ -142,12 +161,12 @@ impl Workbench {
                 });
                 ui.close_menu();
             }
-            if !self.settings.live_presets.is_empty() {
+            if !self.settings.live_presets().is_empty() {
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .max_height(180.0)
                     .show(ui, |ui| {
-                        for (name, original) in &self.settings.live_presets {
+                        for (name, original) in self.settings.live_presets() {
                             ui.horizontal(|ui| {
                                 if ui
                                     .add_sized([200.0, 22.0], egui::Button::new(name).truncate())

@@ -13,6 +13,7 @@ mod graphs;
 mod live_presets;
 mod live_reads;
 pub mod model;
+pub mod profiles;
 mod readiness;
 mod recordings;
 mod release_notes;
@@ -25,6 +26,7 @@ mod scan_notes;
 mod scan_review;
 #[cfg(test)]
 mod tests;
+pub mod units;
 #[cfg(windows)]
 #[doc(hidden)]
 pub mod updates;
@@ -72,6 +74,7 @@ pub enum Page {
     Reports,
     Help,
     Updates,
+    Profiles,
 }
 impl Page {
     const NAVIGATION: [Self; 8] = [
@@ -86,7 +89,7 @@ impl Page {
     ];
 
     #[cfg(test)]
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::Home,
         Self::Codes,
         Self::Live,
@@ -103,6 +106,7 @@ impl Page {
         Self::Connection,
         Self::Help,
         Self::Updates,
+        Self::Profiles,
     ];
 
     fn section(self) -> Self {
@@ -110,7 +114,7 @@ impl Page {
             Self::FreezeFrame | Self::MonitorTests => Self::Emissions,
             Self::Garage | Self::Systems => Self::VehicleInfo,
             Self::Reports | Self::ScanHistory | Self::ScanReview => Self::Recordings,
-            Self::Help => Self::Connection,
+            Self::Help | Self::Profiles => Self::Connection,
             page => page,
         }
     }
@@ -125,6 +129,7 @@ impl Page {
             Self::Recordings | Self::Reports | Self::ScanHistory | Self::ScanReview => "Saved work",
             Self::Connection | Self::Help => "Connection",
             Self::Updates => "Updates",
+            Self::Profiles => "Profiles",
         }
     }
 
@@ -148,6 +153,7 @@ impl Page {
             Self::Connection => &[
                 (Self::Connection, "Adapter"),
                 (Self::Help, "Manual requests"),
+                (Self::Profiles, "Profiles"),
             ],
             _ => &[],
         }
@@ -197,6 +203,7 @@ pub struct Workbench {
     startup_update: updates::StartupUpdate,
     splash: StartupSplash,
     release_notes: release_notes::History,
+    profile_dialog: Option<profiles::Dialog>,
     driver: Option<String>,
     driver_override: Option<DriverInfo>,
     driver_save_error: Option<String>,
@@ -254,6 +261,7 @@ pub struct Workbench {
     vehicle_info_support: Option<PidSupport>,
     pid_support: PidSupport,
     selected: BTreeSet<String>,
+    auto_select_live: bool,
     live_preset_dialog: Option<live_presets::Dialog>,
     search: String,
     favorites_only: bool,
@@ -342,6 +350,8 @@ impl Workbench {
             }
             app
         };
+        let mut app = app;
+        app.prompt_for_profile();
         app
     }
 
@@ -400,6 +410,7 @@ impl Workbench {
             startup_update: updates::StartupUpdate::default(),
             splash: StartupSplash::Hidden,
             release_notes,
+            profile_dialog: None,
             driver: None,
             driver_override,
             driver_save_error: None,
@@ -461,6 +472,7 @@ impl Workbench {
             vehicle_info_support: None,
             pid_support: PidSupport::default(),
             selected: BTreeSet::new(),
+            auto_select_live: true,
             live_preset_dialog: None,
             search: String::new(),
             favorites_only: false,
@@ -508,7 +520,7 @@ impl Workbench {
             lookup: "P0133".into(),
             db,
         };
-        app.preset("Engine");
+        app.select_all_live();
         app.refresh_files();
         app
     }
@@ -538,7 +550,18 @@ impl Workbench {
         }
     }
     fn edit_settings(&mut self, edit: impl FnOnce(&mut Settings)) -> Result<(), String> {
+        let active = self.settings.active_profile.clone();
         self.settings = Settings::edit(&self.root, edit)?;
+        self.settings.active_profile = active;
+        Ok(())
+    }
+    fn try_edit_settings(
+        &mut self,
+        edit: impl FnOnce(&mut Settings) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let active = self.settings.active_profile.clone();
+        self.settings = Settings::try_edit(&self.root, edit)?;
+        self.settings.active_profile = active;
         Ok(())
     }
     fn refresh_files(&mut self) {
@@ -1239,6 +1262,15 @@ impl Workbench {
         queries.sort_by_key(|q| self.pid_availability(q) != PidAvailability::Reported);
         queries
     }
+    fn toggle_graph(&mut self, key: String) {
+        let signals = self.graph_signals.get_or_insert_with(Vec::new);
+        if signals.contains(&key) {
+            signals.retain(|item| item != &key);
+        } else {
+            signals.push(key);
+        }
+        self.graphs = !signals.is_empty();
+    }
     fn apply_sample(&mut self, mut sample: Sample) {
         let received_at = sample.at_ms;
         sample.at_ms = self.results.next_sample_ms(sample.at_ms);
@@ -1366,6 +1398,9 @@ impl Workbench {
                     self.driver = driver;
                     self.protocol = protocol;
                     self.pid_support = pid_support;
+                    if self.auto_select_live {
+                        self.select_all_live();
+                    }
                     self.live_grouping_fell_back = false;
                     self.connection_id = (!demo).then_some(id);
                     self.vehicle_reply_check = None;
@@ -1497,6 +1532,9 @@ impl Workbench {
                     if self.connected && (id == self.epoch || self.connection_id == Some(id)) =>
                 {
                     self.pid_support = support;
+                    if self.auto_select_live {
+                        self.select_all_live();
+                    }
                 }
                 Event::LiveGroupingFallback(id) if id == self.epoch => {
                     self.live_grouping_fell_back = true;
@@ -1903,7 +1941,8 @@ impl Workbench {
         let notes = path.map(scan_notes::load).transpose().map_err(|error| {
             std::io::Error::other(format!("Could not read saved scan notes. {error}"))
         })?;
-        let html = model::report_with_notes(snapshot, None, &notes.unwrap_or_default(), &|code| {
+        let display = self.unit_preferences().snapshot(snapshot);
+        let html = model::report_with_notes(&display, None, &notes.unwrap_or_default(), &|code| {
             self.description_for(&snapshot.vehicle, code)
         });
         self.write_report("scan-report", &html)
@@ -1921,7 +1960,10 @@ impl Workbench {
         baseline: Option<&Snapshot>,
         prefix: &str,
     ) -> std::io::Result<PathBuf> {
-        let html = model::report_with_descriptions(snapshot, baseline, &|code| {
+        let units = self.unit_preferences();
+        let display = units.snapshot(snapshot);
+        let baseline = baseline.map(|snapshot| units.snapshot(snapshot));
+        let html = model::report_with_descriptions(&display, baseline.as_ref(), &|code| {
             self.description_for(&snapshot.vehicle, code)
         });
         self.write_report(prefix, &html)
@@ -2042,7 +2084,9 @@ impl Workbench {
 
     #[cfg(windows)]
     fn update_restart_blocker(&self) -> Option<&'static str> {
-        if self.busy {
+        if self.profile_dialog.is_some() {
+            Some("Save or cancel the profile form before restarting.")
+        } else if self.busy {
             Some("Wait for the current diagnostic operation to finish.")
         } else if self
             .scan_review
@@ -2066,6 +2110,10 @@ impl Workbench {
     #[cfg(windows)]
     fn restart_for_update(&mut self, ctx: &egui::Context) {
         if !self.update_ready() {
+            return;
+        }
+        if self.profile_dialog.is_some() {
+            self.status = "Save or cancel the profile form before restarting.".into();
             return;
         }
         // Finish the current captures before releasing the adapter and stopping its worker.

@@ -137,7 +137,7 @@ fn monitor_label(id: u8, can: bool) -> String {
 fn display_value(r: &Reading) -> String {
     if r.value.parse::<f64>().is_ok() {
         r.numeric
-            .map(|n| format!("{n:.2}"))
+            .map(units::format_number)
             .unwrap_or_else(|| r.value.clone())
     } else {
         r.value.clone()
@@ -173,6 +173,10 @@ impl Workbench {
             return;
         }
         self.draw(ctx);
+        if self.profile_dialog.is_some() {
+            self.show_profile_dialog(ctx);
+            return;
+        }
         #[cfg(windows)]
         self.show_startup_update(ctx, now);
     }
@@ -287,6 +291,8 @@ impl Workbench {
                 }
                 egui::ScrollArea::vertical()
                     .id_salt(("workspace_scroll", self.page))
+                    // Graph/replay clicks must not become background page drags.
+                    .drag_to_scroll(self.page != Page::Live)
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.page {
                         Page::Home => self.home(ui),
@@ -307,6 +313,7 @@ impl Workbench {
                         Page::Reports => self.reports(ui),
                         Page::Help => self.help(ui),
                         Page::Updates => self.update_controls(ui),
+                        Page::Profiles => self.profiles_page(ui),
                     });
             });
         self.show_live_preset_dialog(ctx);
@@ -1561,7 +1568,7 @@ impl Workbench {
                 "Check ECUs to see which report a check-engine light or stored codes.",
             );
         }
-        self.value_table(ui, &values, ValueTable::Data);
+        let _ = self.value_table(ui, &values, ValueTable::Data);
         self.failures(ui, |r| r.request == "0101");
     }
     pub(super) fn description(&self, code: &str) -> String {
@@ -1877,6 +1884,9 @@ impl Workbench {
                     self.break_graphs();
                     self.read_live(self.selected_queries(), false);
                 }
+                if ui.button("Select all").on_hover_text("Select every PID reported by the connected vehicle.").clicked() {
+                    self.select_all_live();
+                }
                 self.live_presets_menu(ui);
                 let recording = self.recording.is_some();
                 if ui
@@ -1907,12 +1917,6 @@ impl Workbench {
 
         if replay {
             self.replay_timeline(ui, "live_replay");
-            if self.graphs
-                && let Some(at) = self.replay_graphs(ui)
-            {
-                self.replay_playing = false;
-                self.seek_replay(at);
-            }
         } else {
             self.recording_mark_controls(ui);
             self.live_selection(ui, read_count);
@@ -1956,59 +1960,82 @@ impl Workbench {
                 },
             );
         }
-        if self.graphs && !replay {
-            let now = self.view_time();
-            let choices: Vec<_> = self
-                .results
-                .rows
-                .iter()
-                .filter(|(_, value)| !value.history.is_empty())
-                .map(|(key, value)| (key.as_str(), graphs::signal_title(&value.latest.reading)))
-                .collect();
-            let automatic = choices.iter().filter_map(|(key, _)| {
-                visible(&self.results.rows[*key].latest.reading).then_some(*key)
-            });
-            let selected = graph_selection(
-                ui,
-                &choices,
-                &mut self.graph_signals,
-                &mut self.graph_window,
-                automatic,
-            );
-            let values: Vec<_> = selected
-                .iter()
-                .filter_map(|key| self.results.rows.get(key))
-                .collect();
-            if values.is_empty() && !choices.is_empty() {
-                caption(ui, "Choose signals to graph.");
-            }
-            let columns = if ui.available_width() >= 670.0 { 2 } else { 1 };
-            for chunk in values.chunks(columns) {
-                ui.columns(columns, |columns| {
-                    for (ui, value) in columns.iter_mut().zip(chunk) {
-                        card(ui, |ui| {
-                            let failed = self.results.refresh_failed(&value.latest);
-                            let reading = &value.latest.reading;
-                            let unit = unit_label(&reading.unit);
-                            ui.strong(graphs::signal_title(reading));
-                            graph_current(ui, Some(value), failed);
-                            let axis = graphs::TimeAxis::live(now, self.graph_window);
-                            let trace =
-                                graphs::Trace::new(&value.history, axis.start_ms, axis.end_ms);
-                            plot(ui, &trace, unit, axis, None);
-                        });
-                    }
-                });
-                ui.add_space(6.0);
-            }
-        }
-        self.value_table(ui, &values, ValueTable::Live);
+        let graph = self.value_table(ui, &values, ValueTable::Live);
         self.failures(ui, |r| {
             visible(r) || self.selected.is_empty() && r.request.starts_with("01")
         });
+        if let Some(key) = graph {
+            self.toggle_graph(key);
+        }
+        if self.graphs {
+            ui.add_space(12.0);
+            if replay {
+                if let Some(at) = self.replay_graphs(ui) {
+                    self.replay_playing = false;
+                    self.seek_replay(at);
+                }
+            } else {
+                self.live_graphs(ui);
+            }
+        }
+    }
+
+    fn live_graphs(&mut self, ui: &mut egui::Ui) {
+        let units = self.unit_preferences();
+        let now = self.view_time();
+        let choices: Vec<_> = self
+            .results
+            .rows
+            .iter()
+            .filter(|(_, value)| value.minimum.is_some())
+            .map(|(key, value)| (key.as_str(), graphs::signal_title(&value.latest.reading)))
+            .collect();
+        let selected = graph_selection(
+            ui,
+            &choices,
+            &mut self.graph_signals,
+            &mut self.graph_window,
+        );
+        let values: Vec<_> = selected
+            .iter()
+            .filter_map(|key| self.results.rows.get(key))
+            .collect();
+        if values.is_empty() && !choices.is_empty() {
+            caption(
+                ui,
+                "Click a graph icon beside a reading, or choose signals to graph.",
+            );
+        }
+        let columns = if ui.available_width() >= 670.0 { 2 } else { 1 };
+        for chunk in values.chunks(columns) {
+            ui.columns(columns, |columns| {
+                for (ui, value) in columns.iter_mut().zip(chunk) {
+                    card(ui, |ui| {
+                        let failed = self.results.refresh_failed(&value.latest);
+                        let reading = &value.latest.reading;
+                        let conversion = units.conversion(&reading.unit);
+                        let unit = conversion.unit(unit_label(&reading.unit));
+                        ui.strong(graphs::signal_title(reading));
+                        graph_current(ui, Some(value), failed, units);
+                        let axis = graphs::TimeAxis::live(now, self.graph_window);
+                        let trace = graphs::Trace::new(
+                            value.history.iter().map(|point| GraphPoint {
+                                at_ms: point.at_ms,
+                                value: point.value.and_then(|value| conversion.apply(value)),
+                            }),
+                            axis.start_ms,
+                            axis.end_ms,
+                        );
+                        plot(ui, &trace, unit, axis, None);
+                    });
+                }
+            });
+            ui.add_space(6.0);
+        }
     }
 
     fn replay_graphs(&mut self, ui: &mut egui::Ui) -> Option<u64> {
+        let units = self.unit_preferences();
         let playback = self.playback.as_ref()?;
         let signals = &playback.graphs().signals;
         if signals.is_empty() {
@@ -2024,7 +2051,6 @@ impl Workbench {
             &choices,
             &mut self.graph_signals,
             &mut self.graph_window,
-            choices.iter().map(|(key, _)| *key),
         );
         if selected.is_empty() {
             caption(ui, "Choose signals to graph.");
@@ -2042,14 +2068,26 @@ impl Workbench {
                         let current = self.results.rows.get(key);
                         let failed =
                             current.is_some_and(|value| self.results.refresh_failed(&value.latest));
-                        graph_current(ui, current, failed);
+                        graph_current(ui, current, failed, units);
+                        let conversion = units.conversion(&series.unit);
                         let trace = graphs::Trace::new(
-                            series.points_in(replay.axis),
+                            series
+                                .points_in(replay.axis)
+                                .iter()
+                                .map(|point| GraphPoint {
+                                    at_ms: point.at_ms,
+                                    value: point.value.and_then(|value| conversion.apply(value)),
+                                }),
                             replay.axis.start_ms,
                             replay.axis.end_ms,
                         );
-                        if let Some(at) = plot(ui, &trace, &series.unit, replay.axis, Some(replay))
-                        {
+                        if let Some(at) = plot(
+                            ui,
+                            &trace,
+                            conversion.unit(&series.unit),
+                            replay.axis,
+                            Some(replay),
+                        ) {
                             jump = Some(at);
                         }
                     });
@@ -2131,6 +2169,7 @@ impl Workbench {
                 });
                 if ui.button("Clear selection").clicked() {
                     self.selected.clear();
+                    self.auto_select_live = false;
                 }
                 egui::ScrollArea::vertical()
                     .id_salt("data_picker")
@@ -2140,7 +2179,7 @@ impl Workbench {
                         let search = self.search.trim().to_ascii_lowercase();
                         for q in self.generic {
                             let key = query_key(q);
-                            let favorite = self.settings.favorites.contains(&key);
+                            let favorite = self.settings.favorites().contains(&key);
                             let matches = q.name.to_ascii_lowercase().contains(&search)
                                 || key.to_ascii_lowercase().contains(&search);
                             let availability = self.pid_availability(q);
@@ -2154,6 +2193,7 @@ impl Workbench {
                             ui.horizontal(|ui| {
                                 let mut picked = self.selected.contains(&key);
                                 if ui.checkbox(&mut picked, "").changed() {
+                                    self.auto_select_live = false;
                                     if picked {
                                         self.selected.insert(key.clone());
                                     } else {
@@ -2181,14 +2221,17 @@ impl Workbench {
                             });
                         }
                         if !favorite_edits.is_empty() {
-                            let result = self.edit_settings(|settings| {
+                            let profile = self.settings.active_profile.clone();
+                            let result = self.try_edit_settings(|settings| {
+                                let favorites = settings.user_favorites_mut(profile.as_deref())?;
                                 for (key, pin) in favorite_edits {
                                     if pin {
-                                        settings.favorites.insert(key);
+                                        favorites.insert(key);
                                     } else {
-                                        settings.favorites.remove(&key);
+                                        favorites.remove(&key);
                                     }
                                 }
+                                Ok(())
                             });
                             self.status = match result {
                                 Ok(()) => "Favorites saved.".into(),
@@ -2436,7 +2479,7 @@ impl Workbench {
                         } else {
                             caption(ui, "Trigger code unavailable.");
                         }
-                        self.value_table(
+                        let _ = self.value_table(
                             ui,
                             &measurements,
                             ValueTable::FreezeFrame {
@@ -3068,6 +3111,10 @@ impl Workbench {
             if play || show_graphs {
                 if self.open_recording(preview.path.clone()) && show_graphs {
                     self.graphs = true;
+                    self.graph_signals = self
+                        .playback
+                        .as_ref()
+                        .map(|capture| capture.graphs().signals.keys().cloned().collect());
                     self.page = Page::Live;
                 }
             } else if export {
@@ -3709,7 +3756,7 @@ impl Workbench {
             .values()
             .filter(|v| v.latest.reading.name == "Manual diagnostic request")
             .collect();
-        self.value_table(ui, &values, ValueTable::Data);
+        let _ = self.value_table(ui, &values, ValueTable::Data);
         self.failures(ui, |r| r.name == "Manual diagnostic request");
     }
     fn log_view(&mut self, ui: &mut egui::Ui) {
@@ -3738,10 +3785,17 @@ impl Workbench {
                 });
         });
     }
-    fn value_table(&self, ui: &mut egui::Ui, values: &[&ValueState], kind: ValueTable) {
+    fn value_table(
+        &self,
+        ui: &mut egui::Ui,
+        values: &[&ValueState],
+        kind: ValueTable,
+    ) -> Option<String> {
         if values.is_empty() {
-            return;
+            return None;
         }
+        let units = self.unit_preferences();
+        let mut graph_clicked = None;
         let stats = matches!(kind, ValueTable::Live);
         let freeze_frame = matches!(kind, ValueTable::FreezeFrame { .. });
         let vehicle_info = !stats && values[0].latest.reading.request.starts_with("09");
@@ -3817,7 +3871,9 @@ impl Workbench {
                     .body(|body| {
                         body.rows(36.0, values.len(), |mut row| {
                             let value = &values[row.index()];
-                            let r = &value.latest.reading;
+                            let original = &value.latest.reading;
+                            let converted = units.reading(original);
+                            let r = converted.as_ref();
                             let age =
                                 self.view_time().saturating_sub(value.latest.at_ms) as f64 / 1000.0;
                             let historical = self.results.predates_clear(&value.latest);
@@ -3840,6 +3896,23 @@ impl Workbench {
                                 });
                             }
                             row.col(|ui| {
+                                if stats {
+                                    let key = row_key(original);
+                                    let chosen = self
+                                        .graph_signals
+                                        .as_ref()
+                                        .is_some_and(|signals| signals.contains(&key));
+                                    if graph_icon(
+                                        ui,
+                                        chosen,
+                                        value.minimum.is_some(),
+                                        &graphs::signal_title(original),
+                                    )
+                                    .clicked()
+                                    {
+                                        graph_clicked = Some(key);
+                                    }
+                                }
                                 ui.add(egui::Label::new(reading_label(r)).truncate())
                                     .on_hover_text(format!(
                                         "{}\nECU {} / {}\n{}",
@@ -3912,16 +3985,31 @@ impl Workbench {
                             });
                             if stats {
                                 row.col(|ui| {
-                                    ui.small(match (value.minimum, value.maximum) {
-                                        (Some(a), Some(b)) => format!("{a:.2} / {b:.2}"),
-                                        _ => "--".into(),
-                                    });
+                                    let conversion = units.conversion(&original.unit);
+                                    ui.small(
+                                        match (
+                                            value
+                                                .minimum
+                                                .and_then(|number| conversion.apply(number)),
+                                            value
+                                                .maximum
+                                                .and_then(|number| conversion.apply(number)),
+                                        ) {
+                                            (Some(a), Some(b)) => format!(
+                                                "{} / {}",
+                                                units::format_number(a),
+                                                units::format_number(b)
+                                            ),
+                                            _ => "--".into(),
+                                        },
+                                    );
                                 });
                             }
                         });
                     });
             },
         );
+        graph_clicked
     }
     fn failures(&self, ui: &mut egui::Ui, predicate: impl Fn(&Reading) -> bool) {
         for value in self
@@ -3949,39 +4037,63 @@ fn reading_issue(ui: &mut egui::Ui, reading: &Reading) {
 fn is_code(request: &str) -> bool {
     codes::Category::from_request(request).is_some() || request == "1902FF"
 }
-fn graph_selection<'a, Label: AsRef<str>>(
+
+fn graph_icon(ui: &mut egui::Ui, selected: bool, enabled: bool, title: &str) -> egui::Response {
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new("")
+            .min_size(Vec2::splat(24.0))
+            .fill(if selected { SELECTED } else { SURFACE }),
+    );
+    let rect = response.rect.shrink(5.0);
+    let color = if enabled { ACCENT } else { MUTED };
+    let painter = ui.painter_at(response.rect);
+    painter.line_segment(
+        [rect.left_top(), rect.left_bottom()],
+        Stroke::new(1.0_f32, color),
+    );
+    painter.line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        Stroke::new(1.0_f32, color),
+    );
+    painter.add(egui::Shape::line(
+        vec![
+            rect.left_bottom() + egui::vec2(1.0, -2.0),
+            egui::pos2(rect.left() + rect.width() * 0.35, rect.center().y),
+            egui::pos2(rect.left() + rect.width() * 0.65, rect.bottom() - 2.0),
+            rect.right_top(),
+        ],
+        Stroke::new(1.6_f32, color),
+    ));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, format!("Graph {title}"))
+    });
+    response.on_hover_text(if !enabled {
+        format!("{title}\nNo numeric reading to graph yet.")
+    } else if selected {
+        format!("Remove {title} from graphs")
+    } else {
+        format!("Add {title} to graphs")
+    })
+}
+fn graph_selection<Label: AsRef<str>>(
     ui: &mut egui::Ui,
     choices: &[(&str, Label)],
     saved: &mut Option<Vec<String>>,
     window: &mut graphs::Window,
-    automatic: impl Iterator<Item = &'a str>,
 ) -> Vec<String> {
-    let automatic: Vec<_> = automatic
-        .take(graphs::MAX_GRAPHS)
-        .map(str::to_owned)
-        .collect();
-    let mut selected = saved.clone().unwrap_or_else(|| automatic.clone());
+    let mut selected = saved.clone().unwrap_or_default();
     selected.retain(|key| choices.iter().any(|(choice, _)| key == choice));
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_id_salt("graph_signals")
-            .selected_text(format!(
-                "Signals · {}/{}",
-                selected.len(),
-                graphs::MAX_GRAPHS
-            ))
+            .selected_text(format!("Signals · {}", selected.len()))
             .width(116.0)
             .height(240.0)
             .show_ui(ui, |ui| {
                 for (key, title) in choices {
                     let mut checked = selected.iter().any(|item| item == key);
-                    if ui
-                        .add_enabled(
-                            checked || selected.len() < graphs::MAX_GRAPHS,
-                            egui::Checkbox::new(&mut checked, title.as_ref()),
-                        )
-                        .changed()
-                    {
+                    if ui.checkbox(&mut checked, title.as_ref()).changed() {
                         if checked {
                             selected.push((*key).to_owned());
                         } else {
@@ -3991,10 +4103,19 @@ fn graph_selection<'a, Label: AsRef<str>>(
                     }
                 }
             });
-        if saved.is_some() && ui.button("Reset graphs").clicked() {
-            *saved = None;
-            selected = automatic;
-            changed = false;
+        if ui
+            .add_enabled(!choices.is_empty(), egui::Button::new("Graph all"))
+            .clicked()
+        {
+            selected = choices.iter().map(|(key, _)| (*key).to_owned()).collect();
+            changed = true;
+        }
+        if ui
+            .add_enabled(!selected.is_empty(), egui::Button::new("Clear graphs"))
+            .clicked()
+        {
+            selected.clear();
+            changed = true;
         }
         egui::ComboBox::from_id_salt("graph_window")
             .selected_text(window.label())
@@ -4011,15 +4132,15 @@ fn graph_selection<'a, Label: AsRef<str>>(
     selected
 }
 
-fn graph_current(ui: &mut egui::Ui, value: Option<&ValueState>, failed: bool) {
+fn graph_current(ui: &mut egui::Ui, value: Option<&ValueState>, failed: bool, units: units::Units) {
     let Some(value) = value else {
         caption(ui, "No reading at the replay position");
         return;
     };
-    let reading = &value.latest.reading;
+    let reading = units.reading(&value.latest.reading);
     let unit = unit_label(&reading.unit);
     ui.horizontal_wrapped(|ui| {
-        let current = format!("{} {unit}", display_value(reading));
+        let current = format!("{} {unit}", display_value(&reading));
         ui.label(RichText::new(current.trim_end()).color(if failed { AMBER } else { ACCENT }));
         if failed {
             ui.colored_label(AMBER, "Refresh failed");
@@ -4151,7 +4272,11 @@ fn plot(
                 tooltip = Some("No sample at this time".to_owned());
             }
         }
-        let range = format!("{low:.2} to {high:.2} {unit}");
+        let range = format!(
+            "{} to {} {unit}",
+            units::format_number(low),
+            units::format_number(high)
+        );
         if replay.is_some() {
             caption(ui, range.trim_end());
         } else {
