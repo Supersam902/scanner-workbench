@@ -3744,7 +3744,7 @@ impl Workbench {
         }
         let stats = matches!(kind, ValueTable::Live);
         let freeze_frame = matches!(kind, ValueTable::FreezeFrame { .. });
-        let vehicle_info = values[0].latest.reading.request.starts_with("09");
+        let vehicle_info = !stats && values[0].latest.reading.request.starts_with("09");
         ui.push_id(
             match kind {
                 ValueTable::Live => "live_values",
@@ -3752,35 +3752,42 @@ impl Workbench {
                 ValueTable::Data => values[0].latest.reading.request.as_str(),
             },
             |ui| {
+                let width = (ui.available_width() - 5.0 * ui.spacing().item_spacing.x).max(0.0);
                 let mut table = egui_extras::TableBuilder::new(ui)
                     .striped(true)
                     .resizable(true)
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-                if !freeze_frame {
-                    table = table.column(egui_extras::Column::initial(90.0));
-                }
-                table = table
-                    .column(
-                        egui_extras::Column::initial(if stats { 180.0 } else { 245.0 })
-                            .at_least(110.0),
-                    )
-                    .column(egui_extras::Column::initial(match kind {
-                        ValueTable::FreezeFrame { .. } => 144.0,
-                        _ if vehicle_info => 180.0,
-                        _ => 100.0,
-                    }));
-                if !vehicle_info {
-                    table = table.column(egui_extras::Column::initial(if stats {
-                        64.0
-                    } else {
-                        85.0
-                    }));
-                }
-                table = table
-                    .column(egui_extras::Column::remainder().at_least(120.0))
-                    .max_scroll_height(300.0);
                 if stats {
-                    table = table.column(egui_extras::Column::initial(100.0));
+                    let ecu = (width * 0.06).max(76.0);
+                    let value = (width * 0.11).max(84.0);
+                    let unit = (width * 0.06).max(52.0);
+                    let state = (width * 0.17).max(112.0);
+                    let range = (width * 0.17).max(112.0);
+                    let name = (width - ecu - value - unit - state - range).max(0.0);
+                    table = table
+                        .resizable(false)
+                        .vscroll(false)
+                        .max_scroll_height(f32::INFINITY);
+                    for width in [ecu, name, value, unit, state, range] {
+                        table = table.column(egui_extras::Column::exact(width));
+                    }
+                } else {
+                    if !freeze_frame {
+                        table = table.column(egui_extras::Column::initial(90.0));
+                    }
+                    table = table
+                        .column(egui_extras::Column::initial(245.0).at_least(110.0))
+                        .column(egui_extras::Column::initial(match kind {
+                            ValueTable::FreezeFrame { .. } => 144.0,
+                            _ if vehicle_info => 180.0,
+                            _ => 100.0,
+                        }));
+                    if !vehicle_info {
+                        table = table.column(egui_extras::Column::initial(85.0));
+                    }
+                    table = table
+                        .column(egui_extras::Column::remainder().at_least(120.0))
+                        .max_scroll_height(300.0);
                 }
                 table
                     .header(27.0, |mut row| {
@@ -3835,7 +3842,8 @@ impl Workbench {
                             row.col(|ui| {
                                 ui.add(egui::Label::new(reading_label(r)).truncate())
                                     .on_hover_text(format!(
-                                        "ECU {} / {}\n{}",
+                                        "{}\nECU {} / {}\n{}",
+                                        reading_label(r),
                                         ecu_label(r.source),
                                         r.request,
                                         r.raw

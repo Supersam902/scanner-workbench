@@ -3879,6 +3879,136 @@ fn update_save_failure_preserves_the_recording_for_recovery_and_retry() {
 }
 
 #[test]
+fn live_data_expands_with_the_window_and_scrolls_with_the_page() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut app = Workbench::new(folder.path().to_owned());
+    app.page = Page::Live;
+    app.connected = true;
+    let pids = [
+        0x04, 0x05, 0x06, 0x07, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x1f, 0x2f,
+    ];
+    app.selected = app
+        .generic
+        .iter()
+        .filter(|query| {
+            query.bytes.len() == 2 && query.bytes[0] == 1 && pids.contains(&query.bytes[1])
+        })
+        .map(query_key)
+        .collect();
+    assert_eq!(app.selected.len(), pids.len());
+    let long_name = "Long-term fuel trim (bank 1, sensor 1)";
+    app.apply_sample(Sample {
+        at_ms: app.now(),
+        rows: pids
+            .iter()
+            .map(|pid| Reading {
+                request: format!("01{pid:02X}"),
+                name: match pid {
+                    0x04 => long_name.into(),
+                    0x2f => "Final live data item".into(),
+                    _ => format!("Live item {pid:02X}"),
+                },
+                ..reading("800", Some(800.0))
+            })
+            .collect(),
+        ..Default::default()
+    });
+    let ctx = render_context();
+    let draw = |app: &mut Workbench, size, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    };
+    let text = |output: &egui::FullOutput, size, label: &str| {
+        output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == label => {
+                let rect = text.visual_bounding_rect();
+                shape
+                    .clip_rect
+                    .intersect(egui::Rect::from_min_size(egui::Pos2::ZERO, size))
+                    .expand(1.0)
+                    .contains_rect(rect)
+                    .then_some((rect, text.galley.elided))
+            }
+            _ => None,
+        })
+    };
+    let mut name_widths = Vec::new();
+    for size in [
+        egui::vec2(960.0, 1000.0),
+        egui::vec2(1600.0, 1000.0),
+        egui::vec2(960.0, 1000.0),
+        egui::vec2(680.0, 1000.0),
+    ] {
+        draw(&mut app, size, vec![]);
+        let output = draw(&mut app, size, vec![]);
+        assert!(
+            text(&output, size, "Final live data item").is_some(),
+            "The table must show all 12 rows when there is room at {size:?}"
+        );
+        for heading in [
+            "ECU",
+            "Data item",
+            "Value",
+            "Unit",
+            "State / age",
+            "Min / max",
+        ] {
+            assert!(
+                text(&output, size, heading).is_some(),
+                "Clipped {heading} at {size:?}"
+            );
+        }
+        let name = text(&output, size, "Data item").unwrap().0;
+        let value = text(&output, size, "Value").unwrap().0;
+        name_widths.push(value.left() - name.left());
+        if size.x >= 960.0 {
+            assert!(
+                !text(&output, size, long_name).unwrap().1,
+                "A long name should fit at {size:?}"
+            );
+        }
+    }
+    assert!(name_widths[1] > name_widths[0] + 150.0);
+    assert!((name_widths[0] - name_widths[2]).abs() < 1.0);
+
+    let small = egui::vec2(960.0, 640.0);
+    draw(&mut app, small, vec![]);
+    let output = draw(&mut app, small, vec![]);
+    assert!(text(&output, small, "Final live data item").is_none());
+    let pointer = text(&output, small, "Data item").unwrap().0.center() + egui::vec2(0.0, 80.0);
+    draw(
+        &mut app,
+        small,
+        vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -600.0),
+                modifiers: Default::default(),
+            },
+        ],
+    );
+    let mut output = draw(&mut app, small, vec![]);
+    for _ in 0..20 {
+        output = draw(&mut app, small, vec![]);
+    }
+    assert!(
+        text(&output, small, "Data item").is_none(),
+        "The page should scroll as one surface, including the table header"
+    );
+    assert!(
+        text(&output, small, "Final live data item").is_some(),
+        "The last reading must remain reachable in a smaller window"
+    );
+}
+
+#[test]
 fn every_new_page_renders_in_compact_and_large_windows() {
     fn visible(shapes: &[egui::epaint::ClippedShape], screen: egui::Rect, label: &str) -> bool {
         fn contains(shape: &egui::Shape, clip: egui::Rect, label: &str) -> bool {

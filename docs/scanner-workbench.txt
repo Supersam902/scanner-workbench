@@ -142,6 +142,9 @@ number of times their conditions were met. A shortened reply is flagged.
 If ECUs report different VINs, the scanner shows both replies and clears
 the VIN it applied to the session.
 
+The Live Data readings list grows to show its rows instead of using an inner
+scrolling box. Columns resize with the window, giving data-item names more room
+on wider screens. When the readings exceed the screen, scroll the page to reach them.
 Live Data polls in the background while the toolbar stays available. A
 separate diagnostic read stops polling and waits for the current request to
 finish. Live Data uses the support reply from Connect and checks additional ranges

@@ -1,7 +1,12 @@
 [
   {
-    "version": "0.1.22",
+    "version": "0.1.23",
     "published_at": "",
+    "notes": "Scanner Workbench 0.1.23\n\nLive Data now expands to show its readings instead of clipping them inside a fixed-height scrolling table. The list uses the available page space, and longer lists scroll with the page when they exceed the screen.\n\nColumns automatically resize with the window. Wider windows give data-item names and reading details more room, and resizing back to a smaller window keeps the columns within the page. Hover a shortened data-item name to read its full name and raw evidence.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.22",
+    "published_at": "2026-11-17T20:29:02Z",
     "notes": "Scanner Workbench 0.1.22\n\nThe automatic startup update message now waits until the splash screen finishes and Overview is visible. The five-second countdown starts there. The message explains that installation is automatic and Scanner Workbench restarts on its own. Choose Later to continue without updating during that session.\n\nUpdates is now a permanent main navigation tab. It remains available when the app is current and turns orange when a verified update is ready. The page includes searchable patch notes for every published Workbench version, sorted newest first. Existing notes are bundled for offline reading, and opening Updates refreshes the history from GitHub in the background.\n\nThe Windows x86 installer is unsigned."
   },
   {
