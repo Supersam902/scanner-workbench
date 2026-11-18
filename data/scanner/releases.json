@@ -1,7 +1,12 @@
 [
   {
-    "version": "0.1.26",
+    "version": "0.1.27",
     "published_at": "",
+    "notes": "Scanner Workbench 0.1.27\n\nOverview now greets the active profile with Hello, Greetings, or a greeting for the time of day. Good morning, Good afternoon and Good evening follow the PC's local clock.\n\nThe greeting style is chosen once per launch. The active profile supplies the name, including after profile switches or name edits.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.26",
+    "published_at": "2026-11-18T01:32:53Z",
     "notes": "Scanner Workbench 0.1.26\n\nOverview now greets the active profile by name after setup and on later startups. It shows Hello, followed by the saved name. The greeting follows profile switches and name edits. Vehicle or connection information appears below the greeting.\n\nThe Windows x86 installer is unsigned."
   },
   {

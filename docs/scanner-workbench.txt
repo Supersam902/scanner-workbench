@@ -9,8 +9,10 @@ Windows 32-bit build, November 13, 2026, revision 26
    profiles later under Connection > Profiles. The first profile retains existing
    favorites and PID presets. Each additional profile keeps its own favorites
    and presets.
-   Overview shows Hello, followed by the active profile's name after setup and
-   on later startups. The greeting follows profile switches and name edits.
+   Overview shows Hello, Greetings, or a greeting for the local time of day,
+   followed by the active profile's name. Good morning, Good afternoon and
+   Good evening follow the PC's local clock. The style is chosen once per launch.
+   The greeting follows profile switches and name edits.
 3. Open Connection > Adapter if you need to change the adapter type.
    J2534 uses an installed 32-bit J2534 04.04 driver. Automatic finds an
    active cable, or you can select a driver. For ELM-compatible serial,

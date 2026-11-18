@@ -10,6 +10,7 @@ mod emissions_scan;
 mod file_picker;
 mod freeze_frames;
 mod graphs;
+mod greeting;
 mod live_presets;
 mod live_reads;
 pub mod model;
@@ -195,6 +196,7 @@ pub struct Workbench {
     rx: mpsc::Receiver<Event>,
     root: PathBuf,
     settings: Settings,
+    greeting: greeting::Style,
     #[cfg(windows)]
     updates: Option<updates::Updates>,
     #[cfg(windows)]
@@ -402,6 +404,7 @@ impl Workbench {
             rx,
             root,
             settings,
+            greeting: greeting::Style::choose(),
             #[cfg(windows)]
             updates: None,
             #[cfg(windows)]

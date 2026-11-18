@@ -551,7 +551,7 @@ impl Workbench {
                             "Connect your adapter"
                         };
                         if let Some(profile) = self.settings.profile() {
-                            ui.add(egui::Label::new(appearance::title(format!("Hello, {}", profile.name), 27.0)).wrap());
+                            ui.add(egui::Label::new(appearance::title(format!("{}, {}", self.greeting.prefix(), profile.name), 27.0)).wrap());
                             caption(ui, title);
                         } else {
                             ui.label(appearance::title(title, 27.0));
