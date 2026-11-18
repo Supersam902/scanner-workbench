@@ -169,6 +169,87 @@ fn connected_as(
 }
 
 #[test]
+fn strict_iso15765_filters_connect_and_read_through_the_native_helper() {
+    let rpm = catalog(include_str!("../data/obdb/saej1979.json"), None)
+        .unwrap()
+        .into_iter()
+        .find(|query| query.bytes == [1, 12])
+        .unwrap();
+    for (mode, protocol, expected_filters) in [
+        (13, CanProtocol::Can11Bit500K, 8),
+        (0, CanProtocol::Can29Bit500K, 2),
+    ] {
+        let dll = fixture(mode);
+        let entry = driver_entry("Strict J2534 adapter", &dll);
+        let (tx, rx) = spawn_with_driver_state(
+            Some(env!("CARGO_BIN_EXE_scanner-workstation").into()),
+            None,
+            Some(dll.clone()),
+            move || vec![entry.clone()],
+        );
+        until(
+            &rx,
+            Duration::from_secs(5),
+            |event| matches!(event, Event::Voltage(Some(sample)) if sample.millivolts == 12600),
+        );
+        assert_eq!(marks(&dll, "channel"), 0);
+        send(
+            &tx,
+            Command::Connect {
+                id: 1,
+                protocol: Some(protocol),
+                ecu: None,
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let attempt = next_protocol_attempt(&rx, 1);
+        assert_eq!(attempt.outcome, AttemptOutcome::Verified, "{attempt:?}");
+        match until(&rx, Duration::from_secs(8), |event| {
+            matches!(event, Event::Connected { id: 1, .. } | Event::Failed(1, _))
+        }) {
+            Event::Connected {
+                driver,
+                protocol: actual,
+                pid_support,
+                ..
+            } => {
+                assert_eq!(driver.as_deref(), Some("Strict J2534 adapter"));
+                assert_eq!(actual, protocol.label());
+                assert!(pid_support.reported.contains(&12));
+            }
+            Event::Failed(_, reason) => panic!("strict filter connection failed: {reason}"),
+            _ => unreachable!(),
+        }
+        assert_eq!(marks(&dll, "flow-filter"), expected_filters);
+        assert_eq!(marks(&dll, "invalid-flow-filter"), 0);
+        send(
+            &tx,
+            Command::Read {
+                id: 2,
+                queries: vec![rpm.clone()],
+                discovery: None,
+                mode: ReadMode::Diagnostic,
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let Event::Rows(_, rows) = until(&rx, Duration::from_secs(5), |event| {
+            matches!(event, Event::Rows(2, _))
+        }) else {
+            unreachable!()
+        };
+        assert!(
+            rows.iter().any(|row| {
+                row.request == "010C" && row.source.is_some() && row.numeric.is_some()
+            })
+        );
+        send(&tx, Command::Disconnect { id: 3 });
+        until(&rx, Duration::from_secs(4), |event| {
+            matches!(event, Event::Disconnected(3))
+        });
+    }
+}
+
+#[test]
 fn connect_reuses_the_probe_and_checks_announced_live_pid_ranges() {
     let dll = fixture(6);
     let (tx, rx) = worker(Arc::new(Mutex::new(dll.clone())));

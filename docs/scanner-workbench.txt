@@ -102,6 +102,10 @@ available at Connect, and the adapter and protocol results. It also includes
 the latest Check vehicle reply result when one is available for that session.
 Driver and adapter error text is included. The app's VIN, scan records and
 log are separate from this report.
+Voltage confirms that the interface can be reached. Connect still requires a
+verified OBD-II reply. If the report shows PassThruStartMsgFilter and
+ERR_INVALID_MSG, update Workbench before retrying. Copy a new connection report
+if setup still fails.
 Use the J2534 Protocol override to limit Connect to a single protocol. A known
 29-bit ECU source limits Connect to 29-bit CAN. Overrides last until the
 app closes.

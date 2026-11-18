@@ -128,6 +128,16 @@ uint32_t API PassThruStartMsgFilter(uint32_t channel, uint32_t type, Message *ma
     const uint32_t header_size = FIXTURE_J1850 ? 2u : FIXTURE_KLINE ? 1u : 4u;
     if (channel != 20 + protocol || mask->protocol != protocol || pattern->protocol != protocol
         || mask->data_size != header_size || pattern->data_size != header_size || filter_count >= 8) return 7;
+    if (protocol == ISO_TP) {
+        const uint32_t flags = (FIXTURE_11BIT ? 0u : EXTENDED) | 0x40u;
+        if (type != 3 || !flow || id(mask) != UINT32_MAX
+            || mask->tx_flags != flags || pattern->tx_flags != flags || flow->tx_flags != flags
+            || flow->protocol != protocol || flow->data_size != header_size) {
+            mark(L".invalid-flow-filter");
+            return 0x0a;
+        }
+        mark(L".flow-filter");
+    }
     if (FIXTURE_KLINE) {
         if (type != 1 || flow != NULL || mask->data[0] != 0 || pattern->data[0] != 0) return 7;
     } else if (FIXTURE_J1850) {
@@ -137,7 +147,7 @@ uint32_t API PassThruStartMsgFilter(uint32_t channel, uint32_t type, Message *ma
         if (type != 1 || flow != NULL || id(mask) != 0x1FFFFF00u || id(pattern) != 0x18DAF100u) return 7;
     } else if (FIXTURE_11BIT) {
         const uint32_t response = id(pattern);
-        if (type != 3 || !flow || id(mask) != 0x7ffu || response < 0x7e8u || response > 0x7efu
+        if (type != 3 || !flow || id(mask) != UINT32_MAX || response < 0x7e8u || response > 0x7efu
             || id(flow) != response - 8) return 7;
     } else {
         uint32_t response = id(pattern);

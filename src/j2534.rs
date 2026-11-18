@@ -994,15 +994,12 @@ impl J2534 {
     }
 
     fn flow_filter(&self, channel: u32, response: u32, request: u32) -> Result<u32, Elm327Error> {
-        let flags = self.protocol.flags();
-        let mask_id = if self.protocol.extended() {
-            u32::MAX
-        } else {
-            0x7ff
-        };
-        let mut mask = Message::new(mask_id, &[], flags)?;
+        // J2534 04.04 §7.2.9 requires an exact four-byte FF mask and common
+        // TxFlags/DataSize across the mask, pattern and flow-control messages.
+        let flags = self.protocol.flags() | FRAME_PAD;
+        let mut mask = Message::new(u32::MAX, &[], flags)?;
         let mut pattern = Message::new(response, &[], flags)?;
-        let mut flow = Message::new(request, &[], flags | FRAME_PAD)?;
+        let mut flow = Message::new(request, &[], flags)?;
         let mut filter = 0;
         self.api.check(
             unsafe {

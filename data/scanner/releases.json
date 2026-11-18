@@ -1,7 +1,12 @@
 [
   {
-    "version": "0.1.27",
+    "version": "0.1.28",
     "published_at": "",
+    "notes": "Scanner Workbench 0.1.28\n\nCorrects ISO 15765 flow-control filter definitions that strict J2534 drivers can reject with ERR_INVALID_MSG, even while battery voltage can be read.\n\n11-bit and 29-bit CAN now use full four-byte exact-match masks and matching padding/addressing flags across all filter messages. Diagnostic requests and flow-control responses continue to use padded CAN frames.\n\nAdds native-driver regression coverage for voltage sampling, verified ECU connections and decoded live data with strict filter validation. Existing protocol, connection and cleanup regressions also use stricter filter validation.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.27",
+    "published_at": "2026-11-18T03:21:12Z",
     "notes": "Scanner Workbench 0.1.27\n\nOverview now greets the active profile with Hello, Greetings, or a greeting for the time of day. Good morning, Good afternoon and Good evening follow the PC's local clock.\n\nThe greeting style is chosen once per launch. The active profile supplies the name, including after profile switches or name edits.\n\nThe Windows x86 installer is unsigned."
   },
   {

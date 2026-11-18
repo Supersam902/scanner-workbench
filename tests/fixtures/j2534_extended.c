@@ -18,7 +18,17 @@ uint32_t API PassThruOpen(const void *name,uint32_t *device){(void)name;if(scena
 uint32_t API PassThruClose(uint32_t device){if(device!=11)return 3;closes++;return 0;}
 uint32_t API PassThruConnect(uint32_t device,uint32_t p,uint32_t flags,uint32_t baud,uint32_t *channel){(void)flags;if(device!=11||!((p==6&&(baud==250000||baud==500000))||((p==3||p==4)&&baud==10400)))return 3;channel_opens++;protocol=p;rate=baud;*channel=22;return 0;}
 uint32_t API PassThruDisconnect(uint32_t channel){return channel==22?0:3;}
-uint32_t API PassThruStartMsgFilter(uint32_t channel,uint32_t type,Message *mask,Message *pattern,Message *flow,uint32_t *id){if(channel!=22||mask->protocol!=protocol||pattern->protocol!=protocol)return 3;if(protocol==6&&(type!=3||!flow))return 3;if(protocol!=6&&(type!=1||flow))return 3;*id=++filters;return 0;}
+uint32_t API PassThruStartMsgFilter(uint32_t channel,uint32_t type,Message *mask,Message *pattern,Message *flow,uint32_t *id){
+ if(channel!=22||mask->protocol!=protocol||pattern->protocol!=protocol)return 3;
+ if(protocol==6){
+  const uint8_t exact_mask[]={0xff,0xff,0xff,0xff};
+  if(type!=3||!flow||mask->data_size!=4||pattern->data_size!=4||flow->data_size!=4
+   ||memcmp(mask->data,exact_mask,4)||flow->protocol!=protocol||!(mask->tx_flags&0x40)
+   ||pattern->tx_flags!=mask->tx_flags||flow->tx_flags!=mask->tx_flags)return 0x0a;
+ }
+ if(protocol!=6&&(type!=1||flow))return 3;
+ *id=++filters;return 0;
+}
 uint32_t API PassThruStopMsgFilter(uint32_t channel,uint32_t id){(void)id;if(channel!=22)return 3;filters--;stopped++;return 0;}
 uint32_t API PassThruStartPeriodicMsg(uint32_t channel,Message *message,uint32_t *id,uint32_t interval){if(channel!=22||message->protocol!=protocol||interval!=2000||!initialized)return 3;*id=++periodic;return 0;}
 uint32_t API PassThruStopPeriodicMsg(uint32_t channel,uint32_t id){(void)id;if(channel!=22)return 3;periodic_stops++;return 0;}
