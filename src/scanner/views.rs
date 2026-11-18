@@ -550,7 +550,12 @@ impl Workbench {
                         } else {
                             "Connect your adapter"
                         };
-                        ui.label(appearance::title(title, 27.0));
+                        if let Some(profile) = self.settings.profile() {
+                            ui.add(egui::Label::new(appearance::title(format!("Hello, {}", profile.name), 27.0)).wrap());
+                            caption(ui, title);
+                        } else {
+                            ui.label(appearance::title(title, 27.0));
+                        }
                         if let Some(driver) = &self.driver {
                             caption(ui, &format!("{driver} · {}", self.protocol));
                             if valid_vin(&self.vehicle.vin) {

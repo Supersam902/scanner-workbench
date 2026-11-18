@@ -1,7 +1,12 @@
 [
   {
-    "version": "0.1.25",
+    "version": "0.1.26",
     "published_at": "",
+    "notes": "Scanner Workbench 0.1.26\n\nOverview now greets the active profile by name after setup and on later startups. It shows Hello, followed by the saved name. The greeting follows profile switches and name edits. Vehicle or connection information appears below the greeting.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.25",
+    "published_at": "2026-11-18T01:05:36Z",
     "notes": "Scanner Workbench 0.1.25\n\nNew profiles, first-run setup and Use default profile now start with mph, grams per second (g/s), Fahrenheit and miles. Pressure starts in kPa.\n\nSaved profiles keep their chosen units. Edit them under Connection > Profiles. Readings, graphs, freeze frames and new reports continue to follow the active profile; original recordings and scan files keep their original values and units.\n\nThe Windows x86 installer is unsigned."
   },
   {
