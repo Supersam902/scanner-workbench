@@ -1,7 +1,12 @@
 [
   {
-    "version": "0.1.24",
+    "version": "0.1.25",
     "published_at": "",
+    "notes": "Scanner Workbench 0.1.25\n\nNew profiles, first-run setup and Use default profile now start with mph, grams per second (g/s), Fahrenheit and miles. Pressure starts in kPa.\n\nSaved profiles keep their chosen units. Edit them under Connection > Profiles. Readings, graphs, freeze frames and new reports continue to follow the active profile; original recordings and scan files keep their original values and units.\n\nThe Windows x86 installer is unsigned."
+  },
+  {
+    "version": "0.1.24",
+    "published_at": "2026-11-17T22:52:55Z",
     "notes": "Scanner Workbench 0.1.24\n\nFirst-run setup now creates a named local profile with independent choices for speed, airflow, temperature, pressure and distance units. Create, edit and switch profiles under Connection > Profiles. The first profile retains existing favorites and saved PID presets. Each profile keeps its own favorites and presets.\n\nReadings, live and replay graph scales, freeze frames and new printouts use the profile's display units. Original recordings, CSV exports and portable scan files retain their values and units. Protocol monitor results keep their original value and limit units.\n\nLive Data defaults to every known PID reported by the connected vehicle. Select all at the top restores that choice. New support replies add reported PIDs while automatic selection is active; manual selections are preserved.\n\nA chart icon beside each numeric reading adds or removes that exact signal and ECU, and automatically shows graphs. Signals, Graph all and Clear graphs have no six-signal cap. Charts appear below the readings, and replay/chart clicks no longer drag the page unexpectedly.\n\nThe Windows x86 installer is unsigned."
   },
   {

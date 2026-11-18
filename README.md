@@ -30,7 +30,7 @@ The installer checks the public GitHub release feed. Once the splash finishes an
 
 Use `--demo` for a practice session and `--data-dir PATH` for separate local storage. See the [Workbench guide](docs/scanner-workbench.txt) and [release documentation](docs/scanner-releases.md).
 
-On first use, create a local profile with your name and preferred speed, airflow, temperature, pressure and distance units. **Connection → Profiles** lets you create, edit and switch profiles. Each profile keeps its own favorites and PID presets. Live readings, graph scales, freeze frames and new printouts use the selected display units. Recordings, CSV and portable scan files retain their original values and units. Monitor-test results and limits retain their protocol units.
+On first use, create a local profile with your name and preferred speed, airflow, temperature, pressure and distance units. New profiles default to mph, g/s, Fahrenheit, kPa and miles. **Connection → Profiles** lets you create, edit and switch profiles. Each profile keeps its own favorites and PID presets. Live readings, graph scales, freeze frames and new printouts use the selected display units. Recordings, CSV and portable scan files retain their original values and units. Monitor-test results and limits retain their protocol units.
 
 ## Build from source
 

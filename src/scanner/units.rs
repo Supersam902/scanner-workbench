@@ -18,11 +18,11 @@ macro_rules! choice {
     };
 }
 
-choice!(Speed, Kmh => "km/h", Mph => "mph");
+choice!(Speed, Mph => "mph", Kmh => "km/h");
 choice!(MassFlow, GramsPerSecond => "g/s", KilogramsPerHour => "kg/h", PoundsPerMinute => "lb/min");
-choice!(Temperature, Celsius => "°C", Fahrenheit => "°F");
+choice!(Temperature, Fahrenheit => "°F", Celsius => "°C");
 choice!(Pressure, Kpa => "kPa", Psi => "psi", Bar => "bar");
-choice!(Distance, Kilometers => "km", Miles => "mi");
+choice!(Distance, Miles => "mi", Kilometers => "km");
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -230,8 +230,14 @@ mod tests {
         close(units.conversion("celsius").apply(100.0), 212.0);
         close(units.conversion("kilopascal").apply(100.0), 14.503773773);
         close(units.conversion("kilometers").apply(1.609344), 1.0);
-        close(Units::default().conversion("mph").apply(1.0), 1.609344);
-        close(Units::default().conversion("°F").apply(212.0), 100.0);
+        let metric = Units {
+            speed: Speed::Kmh,
+            temperature: Temperature::Celsius,
+            distance: Distance::Kilometers,
+            ..Default::default()
+        };
+        close(metric.conversion("mph").apply(1.0), 1.609344);
+        close(metric.conversion("°F").apply(212.0), 100.0);
         close(
             Units {
                 mass_flow: MassFlow::KilogramsPerHour,
@@ -242,7 +248,7 @@ mod tests {
             36.0,
         );
         assert!(units.conversion("km/h").apply(f64::MAX).is_some());
-        assert!(Units::default().conversion("mph").apply(f64::MAX).is_none());
+        assert!(metric.conversion("mph").apply(f64::MAX).is_none());
     }
 
     #[test]

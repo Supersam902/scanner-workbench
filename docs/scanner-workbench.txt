@@ -5,9 +5,10 @@ Windows 32-bit build, November 13, 2026, revision 26
 2. Open Scanner Workbench from the desktop shortcut or the executable in this folder.
    On first use, enter a profile name and choose speed, airflow, temperature,
    pressure and distance units. Save profile keeps these choices. Use default
-   profile creates a profile with metric units. Manage profiles later under
-   Connection > Profiles. The first profile retains existing favorites and PID
-   presets. Each additional profile keeps its own favorites and presets.
+   profile creates a profile with mph, g/s, Fahrenheit, kPa and miles. Manage
+   profiles later under Connection > Profiles. The first profile retains existing
+   favorites and PID presets. Each additional profile keeps its own favorites
+   and presets.
 3. Open Connection > Adapter if you need to change the adapter type.
    J2534 uses an installed 32-bit J2534 04.04 driver. Automatic finds an
    active cable, or you can select a driver. For ELM-compatible serial,

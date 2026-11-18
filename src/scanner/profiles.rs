@@ -153,7 +153,7 @@ impl Workbench {
             ui.label(super::appearance::title("User profiles", 23.0));
             ui.label("Save your name, display units, favorites and live-data presets.");
             if ui.button("New profile").clicked() {
-                self.profile_dialog = Some(Dialog::new(self.unit_preferences(), false));
+                self.profile_dialog = Some(Dialog::new(Units::default(), false));
             }
             let profiles: Vec<_> = self.settings.profiles.values().cloned().collect();
             if profiles.is_empty() {
@@ -248,7 +248,16 @@ mod tests {
         assert_eq!(app.settings.favorites(), &settings.favorites);
         assert_eq!(app.settings.live_presets(), &settings.live_presets);
         let mut other_window = Workbench::new(folder.path().to_owned());
-        let mut second = Dialog::new(Units::default(), false).draft;
+        let mut second = Dialog::new(
+            Units {
+                speed: Speed::Kmh,
+                temperature: Temperature::Celsius,
+                distance: Distance::Kilometers,
+                ..Default::default()
+            },
+            false,
+        )
+        .draft;
         second.name = "Workshop".into();
         other_window.save_profile(&second, None).unwrap();
         assert!(other_window.settings.favorites().is_empty());
@@ -285,12 +294,12 @@ mod tests {
         app.save_profile(&draft, None).unwrap();
         let original = app.settings.profile().unwrap().clone();
         let mut newer = original.clone();
-        newer.units.speed = Speed::Mph;
+        newer.units.speed = Speed::Kmh;
         app.save_profile(&newer, Some(&original)).unwrap();
         let mut stale = original.clone();
-        stale.units.temperature = Temperature::Fahrenheit;
+        stale.units.temperature = Temperature::Celsius;
         assert!(app.save_profile(&stale, Some(&original)).is_err());
-        assert_eq!(app.unit_preferences().speed, Speed::Mph);
+        assert_eq!(app.unit_preferences().speed, Speed::Kmh);
         let bad = folder.path().join("blocked");
         std::fs::write(&bad, b"not a directory").unwrap();
         let mut blocked = Workbench::new(bad);

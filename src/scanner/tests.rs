@@ -1706,7 +1706,7 @@ fn reviewing_a_saved_scan_keeps_its_evidence_and_the_current_session_separate() 
     assert!(text_rect(&draw(&mut app, vec![]), "P0133").is_some());
     click(&mut app, "Frame 0");
     let frame = draw(&mut app, vec![]);
-    for label in ["Frame 0 · ECU 7E8", "Trigger code P0133", "88 °C"] {
+    for label in ["Frame 0 · ECU 7E8", "Trigger code P0133", "190.4 °F"] {
         assert!(text_rect(&frame, label).is_some(), "Missing {label}");
     }
     click(&mut app, "Readiness");
